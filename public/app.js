@@ -67,9 +67,21 @@ function escapeAttr(value) {
   return escapeHtml(value);
 }
 
+async function readJson(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(
+      response.ok
+        ? "De server gaf geen JSON terug. Controleer of de API op Vercel draait (app.py + Redis)."
+        : `API-fout (${response.status}). Is REDIS_URL gezet en opnieuw gedeployed?`
+    );
+  }
+  return response.json();
+}
+
 async function getJson(url) {
   const response = await fetch(url);
-  const data = await response.json();
+  const data = await readJson(response);
   if (!response.ok) throw new Error(data.error || "Gegevens laden is mislukt.");
   return data;
 }
@@ -159,7 +171,7 @@ async function submitAuthentication(event) {
         password: els.authPassword.value,
       }),
     });
-    const data = await response.json();
+    const data = await readJson(response);
     if (!response.ok) throw new Error(data.error || "Inloggen is mislukt.");
     authState = { setupRequired: false, authenticated: true, username: data.username, admin: Boolean(data.admin) };
     els.authPassword.value = "";
@@ -219,7 +231,7 @@ async function addUser(event) {
         admin: els.newAdmin.checked,
       }),
     });
-    const data = await response.json();
+    const data = await readJson(response);
     if (!response.ok) throw new Error(data.error || "Gebruiker aanmaken is mislukt.");
     els.addUserForm.reset();
     await loadUsers();
@@ -233,7 +245,7 @@ async function deleteUser(username) {
   if (!confirm(`Gebruiker ${username} verwijderen?`)) return;
   try {
     const response = await fetch("/api/users?username=" + encodeURIComponent(username), { method: "DELETE" });
-    const data = await response.json();
+    const data = await readJson(response);
     if (!response.ok) throw new Error(data.error || "Verwijderen is mislukt.");
     await loadUsers();
   } catch (error) {
@@ -409,7 +421,7 @@ async function uploadFiles(fileList, expectedKind) {
       const body = new FormData();
       body.append("file", file, file.name);
       const response = await fetch("/api/upload?expected=" + encodeURIComponent(expectedKind), { method: "POST", body });
-      const data = await response.json();
+      const data = await readJson(response);
       if (!response.ok) throw new Error(data.error || `${file.name} kon niet worden geüpload.`);
       if (data.kind === "report") uploadedReport = data.name;
       updateLoading(10 + ((index + 1) / files.length) * 55, `${file.name} ingelezen`);
@@ -465,7 +477,7 @@ async function downloadFile(url, button, fallbackName, withLoading = false) {
     if (!response.ok) {
       let message = "Download maken is mislukt.";
       try {
-        const data = await response.json();
+        const data = await readJson(response);
         message = data.error || message;
       } catch (error) {
         // Geen JSON-fout ontvangen.

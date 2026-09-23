@@ -18,6 +18,9 @@ def create_app() -> Flask:
 
     @app.before_request
     def prepare_session():
+        # Statische CDN-bestanden raken Flask niet; API en overige routes wel.
+        if not request.path.startswith("/api/"):
+            return
         storage.purge_expired_sessions()
         session_id = request.cookies.get("kpt_session") or ""
         session = storage.load_session(session_id)
@@ -34,6 +37,8 @@ def create_app() -> Flask:
 
     @app.after_request
     def finish_session(response: Response):
+        if not hasattr(g, "session_id"):
+            return response
         storage.save_session(g.session_id, g.session)
         if getattr(g, "new_session_cookie", False):
             secure = request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
@@ -334,6 +339,8 @@ def create_app() -> Flask:
 
     @app.get("/<path:filename>")
     def static_files(filename: str):
+        if filename.startswith("api/"):
+            return jsonify({"error": "Onbekend API-eindpunt."}), 404
         target = PUBLIC / filename
         if target.is_file():
             return send_from_directory(PUBLIC, filename)
