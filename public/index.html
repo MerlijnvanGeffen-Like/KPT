@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KPT Tolverdeling</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main id="authShell" class="auth-shell" hidden>
+    <section class="auth-card">
+      <img src="https://kuijperstransport.nl/Images/Logo.png" alt="Kuijpers Transport" />
+      <h1 id="authTitle">Inloggen</h1>
+      <p id="authText">Log in om de tolverdeling te gebruiken.</p>
+      <form id="authForm">
+        <label>
+          Gebruikersnaam
+          <input id="authUsername" type="text" autocomplete="username" required />
+        </label>
+        <label>
+          Wachtwoord
+          <input id="authPassword" type="password" autocomplete="current-password" minlength="4" required />
+        </label>
+        <button id="authSubmit" class="button button-primary" type="submit">Inloggen</button>
+      </form>
+      <div id="authError" class="message error" hidden></div>
+    </section>
+  </main>
+
+  <div id="appShell" hidden>
+    <header class="header">
+      <div class="header-inner">
+        <img src="https://kuijperstransport.nl/Images/Logo.png" alt="Kuijpers Transport" />
+        <div class="header-actions">
+          <span id="currentUser"></span>
+          <button id="usersButton" class="header-button" type="button" hidden>Gebruikers</button>
+          <button id="logoutButton" class="header-button" type="button">Uitloggen</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="intro">
+        <h1>PDF-overzichten maken</h1>
+        <p>Upload hieronder het tolrapport en de bijbehorende weekplanningen.</p>
+      </section>
+
+      <section class="upload-section">
+        <div class="upload-grid">
+          <div id="reportDropZone" class="upload-box">
+            <span class="upload-number">1</span>
+            <h2>Tolrapport</h2>
+            <p>Het MSTS/Telepass-rapport als CSV, XLS of XLSX.</p>
+            <label class="button button-primary">
+              Tolrapport kiezen
+              <input id="reportInput" type="file" accept=".csv,.xls,.xlsx" hidden />
+            </label>
+            <small>of sleep het bestand hierheen</small>
+          </div>
+
+          <div id="planningDropZone" class="upload-box">
+            <span class="upload-number">2</span>
+            <h2>Weekplanningen</h2>
+            <p>Alle relevante <code>Week xx-2026.xls</code>-bestanden.</p>
+            <label class="button">
+              Weekplanningen kiezen
+              <input id="planningInput" type="file" accept=".xls,.xlsx" multiple hidden />
+            </label>
+            <small>je kunt meerdere bestanden tegelijk kiezen</small>
+          </div>
+
+          <div id="invoiceDropZone" class="upload-box upload-box-optional">
+            <span class="upload-number">3</span>
+            <div class="optional-copy">
+              <h2>MSTS-factuur <em>optioneel</em></h2>
+              <p>Upload de originele PDF om factuurdatum en bedragen te controleren.</p>
+            </div>
+            <label class="button">
+              Factuur-PDF kiezen
+              <input id="invoiceInput" type="file" accept=".pdf" hidden />
+            </label>
+          </div>
+        </div>
+
+        <div id="uploadStatus" class="message" hidden></div>
+
+        <div id="sourceStatus" class="source-status" hidden>
+          <div>
+            <strong id="reportName">Nog geen tolrapport</strong>
+            <span id="planningFiles">Geen weekplanningen</span>
+            <span id="invoiceFile">Geen factuur-PDF</span>
+          </div>
+          <button id="clearSessionBtn" class="text-button" type="button">Wissen</button>
+        </div>
+
+        <p class="privacy">Bestanden blijven alleen tijdelijk in het werkgeheugen en worden niet opgeslagen.</p>
+      </section>
+
+      <section id="resultsSection" class="results" hidden>
+        <div class="results-head">
+          <div>
+            <h2>Bedrijven</h2>
+            <p>Kies een factuur en download de PDF’s.</p>
+          </div>
+          <label>
+            Factuur
+            <select id="invoiceSelect"></select>
+          </label>
+        </div>
+
+        <div class="toolbar">
+          <button id="zipInvoiceBtn" class="button button-primary" type="button">Alles downloaden als ZIP</button>
+          <input id="searchInput" type="search" placeholder="Zoek bedrijf…" />
+        </div>
+
+        <div id="summary" class="summary"></div>
+        <div id="invoiceCheck" class="invoice-check" hidden></div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Bedrijf</th>
+                <th class="number">Tol</th>
+                <th class="number">Zonder ritnummer</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="companyRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="userModal" class="modal-backdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="usersTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="usersTitle">Gebruikers</h2>
+          <p>Alleen gebruikersnaam, rol en wachtwoordhash worden opgeslagen.</p>
+        </div>
+        <button id="closeUsersButton" class="close-button" type="button" aria-label="Sluiten">×</button>
+      </div>
+
+      <form id="addUserForm" class="user-form">
+        <label>
+          Gebruikersnaam
+          <input id="newUsername" type="text" autocomplete="off" required />
+        </label>
+        <label>
+          Wachtwoord
+          <input id="newPassword" type="password" minlength="4" autocomplete="new-password" required />
+        </label>
+        <label class="checkbox">
+          <input id="newAdmin" type="checkbox" />
+          Beheerder
+        </label>
+        <button class="button button-primary" type="submit">Gebruiker toevoegen</button>
+      </form>
+      <div id="userError" class="message error" hidden></div>
+      <div id="userList" class="user-list"></div>
+    </section>
+  </div>
+
+  <div id="loadingScreen" class="loading-screen" role="status" aria-live="polite" hidden>
+    <div class="loading-card">
+      <img src="https://kuijperstransport.nl/Images/Logo.png" alt="Kuijpers Transport" />
+      <h2 id="loadingTitle">Bestanden verwerken</h2>
+      <p id="loadingText">Even geduld…</p>
+      <div class="progress-track" aria-hidden="true">
+        <div id="loadingBar" class="progress-bar"></div>
+      </div>
+      <span id="loadingPercent">0%</span>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
