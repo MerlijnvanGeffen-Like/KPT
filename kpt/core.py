@@ -534,9 +534,72 @@ def detect_kind(path: Path, data: bytes | None = None) -> str:
         return "unknown"
 
 
+def normalize_country(value: str) -> str:
+    raw = " ".join((value or "").split())
+    if not raw:
+        return "Onbekend land"
+    key = re.sub(r"[^a-z]", "", raw.lower())
+    aliases = {
+        "nl": "Nederland",
+        "nld": "Nederland",
+        "nederland": "Nederland",
+        "netherlands": "Nederland",
+        "holland": "Nederland",
+        "be": "België",
+        "bel": "België",
+        "belgie": "België",
+        "belgië": "België",
+        "belgium": "België",
+        "de": "Duitsland",
+        "deu": "Duitsland",
+        "duitsland": "Duitsland",
+        "germany": "Duitsland",
+        "deutschland": "Duitsland",
+        "fr": "Frankrijk",
+        "fra": "Frankrijk",
+        "frankrijk": "Frankrijk",
+        "france": "Frankrijk",
+        "lu": "Luxemburg",
+        "lux": "Luxemburg",
+        "luxemburg": "Luxemburg",
+        "luxembourg": "Luxemburg",
+        "at": "Oostenrijk",
+        "aut": "Oostenrijk",
+        "oostenrijk": "Oostenrijk",
+        "austria": "Oostenrijk",
+        "ch": "Zwitserland",
+        "che": "Zwitserland",
+        "zwitserland": "Zwitserland",
+        "switzerland": "Zwitserland",
+        "pl": "Polen",
+        "pol": "Polen",
+        "polen": "Polen",
+        "poland": "Polen",
+        "cz": "Tsjechië",
+        "cze": "Tsjechië",
+        "tsjechie": "Tsjechië",
+        "tsjechië": "Tsjechië",
+        "czechrepublic": "Tsjechië",
+        "it": "Italië",
+        "ita": "Italië",
+        "italie": "Italië",
+        "italië": "Italië",
+        "italy": "Italië",
+        "es": "Spanje",
+        "esp": "Spanje",
+        "spanje": "Spanje",
+        "spain": "Spanje",
+        "dk": "Denemarken",
+        "dnk": "Denemarken",
+        "denemarken": "Denemarken",
+        "denmark": "Denemarken",
+    }
+    return aliases.get(key, raw)
+
+
 def build_customer_pdf_rows(
     report_name: str, invoice_id: str, uploaded: dict
-) -> tuple[dict, dict[str, list[dict]]]:
+) -> tuple[dict, dict[tuple[str, str], list[dict]]]:
     invoices = list_invoices(report_name, uploaded)
     invoice = next((item for item in invoices if item["id"] == invoice_id), None)
     if not invoice:
@@ -549,16 +612,17 @@ def build_customer_pdf_rows(
     for plan in plan_map.values():
         frequency[plan["plate"]][plan["customer"]] += 1
 
-    grouped: dict[tuple[str, str, str], dict] = {}
+    grouped: dict[tuple[str, str, str, str], dict] = {}
     for transaction in transactions:
         iso_date = dmy_iso(transaction.get("date") or "")
         plate = transaction["plate"]
+        country = normalize_country(transaction.get("country") or "")
         plan = plan_map.get((iso_date, plate))
         counts = frequency.get(plate) or {}
         fallback = max(counts.items(), key=lambda entry: entry[1])[0] if counts else ""
         automatic_customer = plan["customer"] if plan else fallback
         customer = automatic_customer or "Nog te verdelen"
-        key = (iso_date, plate, customer)
+        key = (iso_date, plate, customer, country)
         item = grouped.setdefault(
             key,
             {
@@ -568,6 +632,7 @@ def build_customer_pdf_rows(
                 "km": 0.0,
                 "eur": 0.0,
                 "customer": customer,
+                "country": country,
                 "ritnr": (plan or {}).get("tripNumber") or "",
             },
         )
@@ -577,23 +642,24 @@ def build_customer_pdf_rows(
         if "-" in (transaction.get("plateRaw") or ""):
             item["plate"] = transaction["plateRaw"]
 
-    by_customer: dict[str, list[dict]] = defaultdict(list)
+    by_group: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for item in grouped.values():
         item["km"] = round(item["km"], 1)
         item["eur"] = round(item["eur"], 2)
-        by_customer[item["customer"]].append(item)
-    for rows in by_customer.values():
+        by_group[(item["customer"], item["country"])].append(item)
+    for rows in by_group.values():
         rows.sort(key=lambda row: ((row["date"] or date.min), row["plate"]))
-    return invoice, dict(by_customer)
+    return invoice, dict(by_group)
 
 
 def list_pdf_customers(report_name: str, invoice_id: str, uploaded: dict) -> list[dict]:
-    _invoice, by_customer = build_customer_pdf_rows(report_name, invoice_id, uploaded)
+    _invoice, by_group = build_customer_pdf_rows(report_name, invoice_id, uploaded)
     result = []
-    for customer, rows in sorted(by_customer.items(), key=lambda item: item[0].lower()):
+    for (customer, country), rows in sorted(by_group.items(), key=lambda item: (item[0][0].lower(), item[0][1].lower())):
         result.append(
             {
                 "customer": customer,
+                "country": country,
                 "rows": len(rows),
                 "trips": sum(row["ritten"] for row in rows),
                 "km": round(sum(row["km"] for row in rows), 1),
@@ -604,14 +670,17 @@ def list_pdf_customers(report_name: str, invoice_id: str, uploaded: dict) -> lis
     return result
 
 
-def build_customer_pdf(report_name: str, invoice_id: str, customer: str, uploaded: dict) -> bytes:
+def build_customer_pdf(
+    report_name: str, invoice_id: str, customer: str, country: str, uploaded: dict
+) -> bytes:
     import maak_pdf_per_klant as pdf
 
-    invoice, by_customer = build_customer_pdf_rows(report_name, invoice_id, uploaded)
-    rows = by_customer.get(customer)
+    invoice, by_group = build_customer_pdf_rows(report_name, invoice_id, uploaded)
+    country = normalize_country(country)
+    rows = by_group.get((customer, country))
     if not rows:
-        raise ValueError("Klant niet gevonden in deze factuur")
-    return pdf.make_pdf_bytes(customer, rows, invoice, report_name)
+        raise ValueError("Klant/land-combinatie niet gevonden in deze factuur")
+    return pdf.make_pdf_bytes(customer, rows, invoice, report_name, country=country)
 
 
 def build_customer_zip(report_name: str, invoice_id: str | None, uploaded: dict) -> bytes:
@@ -626,14 +695,16 @@ def build_customer_zip(report_name: str, invoice_id: str | None, uploaded: dict)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for invoice in invoices:
-            current, by_customer = build_customer_pdf_rows(report_name, invoice["id"], uploaded)
+            current, by_group = build_customer_pdf_rows(report_name, invoice["id"], uploaded)
             folder = f"Factuur {pdf.safe_name(current['id'])}"
             if current.get("date"):
                 folder += " - " + current["date"].replace("/", "-")
-            for customer, rows in sorted(by_customer.items(), key=lambda item: item[0].lower()):
-                filename = f"Toloverzicht - {pdf.safe_name(customer)}.pdf"
+            for (customer, country), rows in sorted(
+                by_group.items(), key=lambda item: (item[0][0].lower(), item[0][1].lower())
+            ):
+                filename = f"Toloverzicht - {pdf.safe_name(customer)} - {pdf.safe_name(country)}.pdf"
                 archive.writestr(
                     f"{folder}/{filename}",
-                    pdf.make_pdf_bytes(customer, rows, current, report_name),
+                    pdf.make_pdf_bytes(customer, rows, current, report_name, country=country),
                 )
     return buffer.getvalue()

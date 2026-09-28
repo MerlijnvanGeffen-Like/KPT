@@ -70,13 +70,39 @@ function escapeAttr(value) {
 async function readJson(response) {
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) {
+    if (response.status === 413) {
+      throw new Error(
+        "Bestand is te groot voor de serverlimiet. De app comprimeert uploads automatisch — vernieuw de pagina en probeer opnieuw, of gebruik start.bat lokaal."
+      );
+    }
+    if (response.status === 503 || response.status === 500) {
+      throw new Error(
+        `Serverfout (${response.status}). Controleer Redis/Upstash op Vercel en of de laatste versie is gedeployed.`
+      );
+    }
     throw new Error(
       response.ok
-        ? "De server gaf geen JSON terug. Controleer of de API op Vercel draait (app.py + Redis)."
-        : `API-fout (${response.status}). Is REDIS_URL gezet en opnieuw gedeployed?`
+        ? "De server gaf geen JSON terug. Controleer of de API op Vercel draait."
+        : `API-fout (${response.status}). Vernieuw de pagina of controleer de Vercel-logs.`
     );
   }
   return response.json();
+}
+
+async function gzipFileIfHelpful(file) {
+  if (typeof CompressionStream === "undefined" || file.size < 200 * 1024) {
+    return { blob: file, compressed: false };
+  }
+  try {
+    const stream = file.stream().pipeThrough(new CompressionStream("gzip"));
+    const blob = await new Response(stream).blob();
+    if (blob.size >= file.size * 0.9) {
+      return { blob: file, compressed: false };
+    }
+    return { blob, compressed: true };
+  } catch (error) {
+    return { blob: file, compressed: false };
+  }
 }
 
 async function getJson(url) {
@@ -320,7 +346,7 @@ async function loadCompanies() {
     return;
   }
 
-  els.companyRows.innerHTML = `<tr><td colspan="4" class="loading">Bedrijven laden…</td></tr>`;
+  els.companyRows.innerHTML = `<tr><td colspan="5" class="loading">Bedrijven laden…</td></tr>`;
   const url = "/api/pdf-customers?file=" + encodeURIComponent(report)
     + "&invoice=" + encodeURIComponent(invoice);
   const data = await getJson(url);
@@ -351,12 +377,17 @@ async function loadInvoiceCheck() {
 
 function renderCompanies() {
   const query = els.searchInput.value.trim().toLowerCase();
-  const visible = companies.filter((item) => item.customer.toLowerCase().includes(query));
+  const visible = companies.filter((item) => {
+    const haystack = `${item.customer || ""} ${item.country || ""}`.toLowerCase();
+    return haystack.includes(query);
+  });
   const total = companies.reduce((sum, item) => sum + item.eur, 0);
   const missing = companies.reduce((sum, item) => sum + item.missingTripNumbers, 0);
+  const countries = new Set(companies.map((item) => item.country).filter(Boolean));
 
   els.summary.innerHTML = companies.length
-    ? `<span><b>${companies.length}</b> bedrijven</span>
+    ? `<span><b>${companies.length}</b> overzichten</span>
+       <span><b>${countries.size}</b> landen</span>
        <span><b>${euro.format(total)}</b> tol</span>
        <span class="${missing ? "warning-text" : ""}"><b>${missing}</b> regels zonder ritnummer</span>`
     : "";
@@ -366,22 +397,25 @@ function renderCompanies() {
 
   if (!visible.length) {
     els.companyRows.innerHTML = companies.length
-      ? `<tr><td colspan="4" class="empty-row">Geen bedrijf gevonden.</td></tr>`
+      ? `<tr><td colspan="5" class="empty-row">Geen bedrijf/land gevonden.</td></tr>`
       : "";
     return;
   }
 
   els.companyRows.innerHTML = visible.map((item) => {
     const warningClass = item.customer === "Nog te verdelen" ? "company-warning" : "";
-    const missing = item.missingTripNumbers
+    const missingCount = item.missingTripNumbers
       ? `<span class="missing">${item.missingTripNumbers}</span>`
       : "0";
     return `<tr class="${warningClass}">
       <td><strong>${escapeHtml(item.customer)}</strong></td>
+      <td>${escapeHtml(item.country || "")}</td>
       <td class="number">${euro.format(item.eur)}</td>
-      <td class="number">${missing}</td>
+      <td class="number">${missingCount}</td>
       <td class="download-cell">
-        <button type="button" class="button button-small" data-customer="${escapeAttr(item.customer)}">PDF downloaden</button>
+        <button type="button" class="button button-small"
+          data-customer="${escapeAttr(item.customer)}"
+          data-country="${escapeAttr(item.country || "")}">PDF downloaden</button>
       </td>
     </tr>`;
   }).join("");
@@ -417,9 +451,11 @@ async function uploadFiles(fileList, expectedKind) {
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       setStatus(`Uploaden ${index + 1} van ${files.length}: ${file.name}`);
-      updateLoading(10 + (index / files.length) * 55, `${file.name} uploaden…`);
+      updateLoading(10 + (index / files.length) * 55, `${file.name} comprimeren/uploaden…`);
+      const prepared = await gzipFileIfHelpful(file);
       const body = new FormData();
-      body.append("file", file, file.name);
+      body.append("file", prepared.blob, file.name);
+      if (prepared.compressed) body.append("compressed", "gzip");
       const response = await fetch("/api/upload?expected=" + encodeURIComponent(expectedKind), { method: "POST", body });
       const data = await readJson(response);
       if (!response.ok) throw new Error(data.error || `${file.name} kon niet worden geüpload.`);
@@ -505,11 +541,13 @@ async function downloadFile(url, button, fallbackName, withLoading = false) {
   }
 }
 
-function downloadCompany(customer, button) {
+function downloadCompany(customer, country, button) {
   const url = "/api/customer-pdf?file=" + encodeURIComponent(selectedReport())
     + "&invoice=" + encodeURIComponent(selectedInvoice())
-    + "&customer=" + encodeURIComponent(customer);
-  return downloadFile(url, button, `Toloverzicht - ${customer}.pdf`);
+    + "&customer=" + encodeURIComponent(customer)
+    + "&country=" + encodeURIComponent(country || "");
+  const name = `Toloverzicht - ${customer} - ${country || "Onbekend land"}.pdf`;
+  return downloadFile(url, button, name);
 }
 
 function downloadZip(button) {
@@ -558,7 +596,7 @@ els.searchInput.addEventListener("input", renderCompanies);
 els.zipInvoiceBtn.addEventListener("click", () => downloadZip(els.zipInvoiceBtn));
 els.companyRows.addEventListener("click", (event) => {
   const button = event.target.closest("[data-customer]");
-  if (button) downloadCompany(button.dataset.customer, button);
+  if (button) downloadCompany(button.dataset.customer, button.dataset.country || "", button);
 });
 
 bootstrapAuthentication().catch((error) => {

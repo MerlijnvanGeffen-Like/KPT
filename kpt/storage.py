@@ -1,29 +1,49 @@
-"""Opslag voor gebruikers en tijdelijke sessies (geheugen lokaal, Redis op Vercel)."""
+"""Opslag voor gebruikers en tijdelijke sessies (geheugen lokaal, Redis/Upstash op Vercel)."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
 import threading
 import time
+import zlib
 from pathlib import Path
+from typing import Any
 
 SESSION_TTL = int(os.environ.get("KPT_SESSION_TTL", str(2 * 60 * 60)))
 MAX_SESSION_BYTES = 100 * 1024 * 1024
+_B64 = "b64:"
+# Upstash free/REST: houd encoded chunks onder ~750 KB.
+_REST_CHUNK_CHARS = 700_000
 
 _lock = threading.RLock()
 _MEMORY_SESSIONS: dict[str, dict] = {}
 _MEMORY_USERS: dict[str, dict] = {}
 _LOGIN_ATTEMPTS: dict[str, list[float]] = {}
-_redis = None
-_redis_failed = False
+_store = None
+_store_failed = False
 
 
 def is_vercel() -> bool:
     return bool(os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"))
 
 
-def redis_url() -> str:
+def rest_credentials() -> tuple[str, str]:
+    url = (
+        os.environ.get("KV_REST_API_URL")
+        or os.environ.get("UPSTASH_REDIS_REST_URL")
+        or ""
+    ).strip()
+    token = (
+        os.environ.get("KV_REST_API_TOKEN")
+        or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+        or ""
+    ).strip()
+    return url, token
+
+
+def tcp_redis_url() -> str:
     return (
         os.environ.get("REDIS_URL")
         or os.environ.get("KV_URL")
@@ -32,32 +52,183 @@ def redis_url() -> str:
     ).strip()
 
 
+def has_remote_store() -> bool:
+    url, token = rest_credentials()
+    return bool((url and token) or tcp_redis_url())
+
+
 def require_redis_on_vercel() -> None:
-    if is_vercel() and not redis_url():
+    if is_vercel() and not has_remote_store():
         raise RuntimeError(
-            "Op Vercel is REDIS_URL verplicht voor accounts en tijdelijke uploads. "
-            "Koppel Upstash Redis in het Vercel-project."
+            "Op Vercel is Redis verplicht. Koppel Upstash Redis via Vercel → Storage/Integrations "
+            "(zet KV_REST_API_URL + KV_REST_API_TOKEN) en redeploy."
         )
 
 
-def get_redis():
-    global _redis, _redis_failed
-    url = redis_url()
-    if not url:
+def _encode_value(value: bytes | str) -> str:
+    if isinstance(value, bytes):
+        packed = b"Z" + zlib.compress(value, 6)
+        return _B64 + base64.b64encode(packed).decode("ascii")
+    return value
+
+
+def _decode_value(value: Any) -> bytes | None:
+    if value is None:
         return None
-    if _redis is not None:
-        return _redis
-    if _redis_failed:
-        return None
-    try:
+    if isinstance(value, bytes):
+        if value.startswith(b"Z"):
+            try:
+                return zlib.decompress(value[1:])
+            except zlib.error:
+                return value
+        return value
+    text = str(value)
+    if text.startswith(_B64):
+        raw = base64.b64decode(text[len(_B64) :])
+        if raw.startswith(b"Z"):
+            try:
+                return zlib.decompress(raw[1:])
+            except zlib.error:
+                return raw
+        return raw
+    return text.encode("utf-8")
+
+
+class _UpstashStore:
+    """HTTP Redis via Upstash REST (standaard na Vercel-integratie)."""
+
+    def __init__(self, url: str, token: str):
+        from upstash_redis import Redis
+
+        self._redis = Redis(url=url, token=token)
+
+    def _clear_chunks(self, key: str) -> None:
+        marker = self._redis.get(f"{key}:chunks")
+        to_delete = [key, f"{key}:chunks"]
+        if marker is not None:
+            try:
+                count = int(marker)
+            except (TypeError, ValueError):
+                count = 0
+            to_delete.extend(f"{key}:c:{index}" for index in range(count))
+        self._redis.delete(*to_delete)
+
+    def get_bytes(self, key: str) -> bytes | None:
+        marker = self._redis.get(f"{key}:chunks")
+        if marker is not None:
+            try:
+                count = int(marker)
+            except (TypeError, ValueError):
+                return None
+            parts = []
+            for index in range(count):
+                part = self._redis.get(f"{key}:c:{index}")
+                if part is None:
+                    return None
+                parts.append(str(part))
+            return _decode_value("".join(parts))
+        return _decode_value(self._redis.get(key))
+
+    def set_bytes(self, key: str, value: bytes | str, ex: int | None = None) -> None:
+        encoded = _encode_value(value) if isinstance(value, bytes) else value
+        self._clear_chunks(key)
+        if len(encoded) <= _REST_CHUNK_CHARS:
+            if ex is None:
+                self._redis.set(key, encoded)
+            else:
+                self._redis.set(key, encoded, ex=ex)
+            return
+        chunks = [encoded[i : i + _REST_CHUNK_CHARS] for i in range(0, len(encoded), _REST_CHUNK_CHARS)]
+        if ex is None:
+            self._redis.set(f"{key}:chunks", str(len(chunks)))
+            for index, chunk in enumerate(chunks):
+                self._redis.set(f"{key}:c:{index}", chunk)
+        else:
+            self._redis.set(f"{key}:chunks", str(len(chunks)), ex=ex)
+            for index, chunk in enumerate(chunks):
+                self._redis.set(f"{key}:c:{index}", chunk, ex=ex)
+
+    def delete(self, *keys: str) -> None:
+        if not keys:
+            return
+        for key in keys:
+            self._clear_chunks(key)
+
+    def llen(self, key: str) -> int:
+        return int(self._redis.llen(key) or 0)
+
+    def rpush(self, key: str, value: str) -> None:
+        self._redis.rpush(key, value)
+
+    def expire(self, key: str, seconds: int) -> None:
+        self._redis.expire(key, seconds)
+
+    def scan_keys(self, match: str) -> list[str]:
+        cursor = 0
+        found: list[str] = []
+        while True:
+            cursor, keys = self._redis.scan(cursor, match=match, count=100)
+            found.extend(str(key) for key in keys)
+            if int(cursor) == 0:
+                break
+        return found
+
+
+class _TcpStore:
+    """Klassieke Redis TCP-verbinding (REDIS_URL / KV_URL)."""
+
+    def __init__(self, url: str):
         import redis
 
-        client = redis.from_url(url, decode_responses=False)
-        client.ping()
-        _redis = client
-        return client
+        self._redis = redis.from_url(url, decode_responses=False)
+        self._redis.ping()
+
+    def get_bytes(self, key: str) -> bytes | None:
+        raw = self._redis.get(key)
+        return raw if raw is None or isinstance(raw, bytes) else bytes(raw)
+
+    def set_bytes(self, key: str, value: bytes | str, ex: int | None = None) -> None:
+        data = value if isinstance(value, bytes) else value.encode("utf-8")
+        self._redis.set(key, data, ex=ex)
+
+    def delete(self, *keys: str) -> None:
+        if keys:
+            self._redis.delete(*keys)
+
+    def llen(self, key: str) -> int:
+        return int(self._redis.llen(key) or 0)
+
+    def rpush(self, key: str, value: str) -> None:
+        self._redis.rpush(key, value.encode("utf-8"))
+
+    def expire(self, key: str, seconds: int) -> None:
+        self._redis.expire(key, seconds)
+
+    def scan_keys(self, match: str) -> list[str]:
+        keys = []
+        for key in self._redis.scan_iter(match=match):
+            keys.append(key.decode("utf-8") if isinstance(key, bytes) else str(key))
+        return keys
+
+
+def get_store():
+    global _store, _store_failed
+    if _store is not None:
+        return _store
+    if _store_failed:
+        return None
+    try:
+        rest_url, rest_token = rest_credentials()
+        if rest_url and rest_token:
+            _store = _UpstashStore(rest_url, rest_token)
+            return _store
+        tcp = tcp_redis_url()
+        if tcp:
+            _store = _TcpStore(tcp)
+            return _store
+        return None
     except Exception:
-        _redis_failed = True
+        _store_failed = True
         if is_vercel():
             raise
         return None
@@ -69,9 +240,9 @@ def local_users_path() -> Path:
 
 
 def load_users() -> dict:
-    client = get_redis()
-    if client is not None:
-        raw = client.get("kpt:users")
+    store = get_store()
+    if store is not None:
+        raw = store.get_bytes("kpt:users")
         if not raw:
             return {}
         try:
@@ -95,9 +266,9 @@ def load_users() -> dict:
 
 
 def save_users(users: dict) -> None:
-    client = get_redis()
-    if client is not None:
-        client.set("kpt:users", json.dumps(users, ensure_ascii=False).encode("utf-8"))
+    store = get_store()
+    if store is not None:
+        store.set_bytes("kpt:users", json.dumps(users, ensure_ascii=False).encode("utf-8"))
         return
 
     if is_vercel():
@@ -138,9 +309,9 @@ def purge_expired_sessions(now: float | None = None) -> None:
 def load_session(session_id: str) -> dict | None:
     if not session_id:
         return None
-    client = get_redis()
-    if client is not None:
-        meta_raw = client.get(f"kpt:sess:{session_id}:meta")
+    store = get_store()
+    if store is not None:
+        meta_raw = store.get_bytes(f"kpt:sess:{session_id}:meta")
         if not meta_raw:
             return None
         try:
@@ -149,7 +320,7 @@ def load_session(session_id: str) -> dict | None:
             return None
         files: dict[str, dict] = {}
         for name, info in (meta.get("files") or {}).items():
-            data = client.get(f"kpt:sess:{session_id}:file:{name}")
+            data = store.get_bytes(f"kpt:sess:{session_id}:file:{name}")
             if data is None:
                 continue
             files[name] = {
@@ -171,9 +342,17 @@ def load_session(session_id: str) -> dict | None:
 
 def save_session(session_id: str, session: dict) -> None:
     session["updated"] = time.time()
-    client = get_redis()
-    if client is not None:
-        pipe = client.pipeline()
+    store = get_store()
+    if store is not None:
+        previous_raw = store.get_bytes(f"kpt:sess:{session_id}:meta")
+        previous_files = set()
+        if previous_raw:
+            try:
+                previous_files = set((json.loads(previous_raw.decode("utf-8")).get("files") or {}).keys())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                previous_files = set()
+
+        files = session.get("files") or {}
         meta = {
             "user": session.get("user") or "",
             "admin": bool(session.get("admin")),
@@ -181,21 +360,20 @@ def save_session(session_id: str, session: dict) -> None:
             "updated": session["updated"],
             "files": {
                 name: {"mtime": item.get("mtime"), "kind": item.get("kind"), "size": len(item.get("data") or b"")}
-                for name, item in (session.get("files") or {}).items()
+                for name, item in files.items()
             },
         }
-        pipe.set(f"kpt:sess:{session_id}:meta", json.dumps(meta, ensure_ascii=False).encode("utf-8"), ex=SESSION_TTL)
-        existing = set()
-        for key in client.scan_iter(match=f"kpt:sess:{session_id}:file:*"):
-            existing.add(key.decode("utf-8") if isinstance(key, bytes) else key)
-        keep = set()
-        for name, item in (session.get("files") or {}).items():
-            key = f"kpt:sess:{session_id}:file:{name}"
-            keep.add(key)
-            pipe.set(key, item.get("data") or b"", ex=SESSION_TTL)
-        for key in existing - keep:
-            pipe.delete(key)
-        pipe.execute()
+        store.set_bytes(
+            f"kpt:sess:{session_id}:meta",
+            json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+            ex=SESSION_TTL,
+        )
+        keep = set(files)
+        for name, item in files.items():
+            store.set_bytes(f"kpt:sess:{session_id}:file:{name}", item.get("data") or b"", ex=SESSION_TTL)
+        removed = previous_files - keep
+        if removed:
+            store.delete(*(f"kpt:sess:{session_id}:file:{name}" for name in removed))
         return
 
     with _lock:
@@ -205,12 +383,17 @@ def save_session(session_id: str, session: dict) -> None:
 def delete_session(session_id: str) -> None:
     if not session_id:
         return
-    client = get_redis()
-    if client is not None:
+    store = get_store()
+    if store is not None:
+        meta_raw = store.get_bytes(f"kpt:sess:{session_id}:meta")
         keys = [f"kpt:sess:{session_id}:meta"]
-        keys.extend(client.scan_iter(match=f"kpt:sess:{session_id}:file:*"))
-        if keys:
-            client.delete(*keys)
+        if meta_raw:
+            try:
+                meta = json.loads(meta_raw.decode("utf-8"))
+                keys.extend(f"kpt:sess:{session_id}:file:{name}" for name in (meta.get("files") or {}))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+        store.delete(*keys)
         return
     with _lock:
         _MEMORY_SESSIONS.pop(session_id, None)
@@ -220,19 +403,20 @@ def clear_user_sessions(username: str) -> None:
     username = (username or "").strip().lower()
     if not username:
         return
-    client = get_redis()
-    if client is not None:
-        for key in client.scan_iter(match="kpt:sess:*:meta"):
-            raw = client.get(key)
+    store = get_store()
+    if store is not None:
+        for key in store.scan_keys("kpt:sess:*:meta"):
+            raw = store.get_bytes(key)
             if not raw:
                 continue
             try:
                 meta = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
             if (meta.get("user") or "").lower() == username:
-                delete_session(key_str.split(":")[2])
+                parts = key.split(":")
+                if len(parts) >= 3:
+                    delete_session(parts[2])
         return
     with _lock:
         for session in _MEMORY_SESSIONS.values():
@@ -245,9 +429,9 @@ def clear_user_sessions(username: str) -> None:
 
 def login_is_blocked(key: str) -> bool:
     cutoff = time.time() - 10 * 60
-    client = get_redis()
-    if client is not None:
-        return int(client.llen(f"kpt:login:{key}") or 0) >= 8
+    store = get_store()
+    if store is not None:
+        return store.llen(f"kpt:login:{key}") >= 8
     with _lock:
         attempts = [stamp for stamp in _LOGIN_ATTEMPTS.get(key, []) if stamp >= cutoff]
         _LOGIN_ATTEMPTS[key] = attempts
@@ -255,29 +439,29 @@ def login_is_blocked(key: str) -> bool:
 
 
 def record_login_failure(key: str) -> None:
-    client = get_redis()
-    if client is not None:
+    store = get_store()
+    if store is not None:
         redis_key = f"kpt:login:{key}"
-        pipe = client.pipeline()
-        pipe.rpush(redis_key, str(time.time()).encode("utf-8"))
-        pipe.expire(redis_key, 10 * 60)
-        pipe.execute()
+        store.rpush(redis_key, str(time.time()))
+        store.expire(redis_key, 10 * 60)
         return
     with _lock:
         _LOGIN_ATTEMPTS.setdefault(key, []).append(time.time())
 
 
 def clear_login_failures(key: str) -> None:
-    client = get_redis()
-    if client is not None:
-        client.delete(f"kpt:login:{key}")
+    store = get_store()
+    if store is not None:
+        store.delete(f"kpt:login:{key}")
         return
     with _lock:
         _LOGIN_ATTEMPTS.pop(key, None)
 
 
 def storage_mode() -> str:
-    if redis_url():
+    if rest_credentials()[0] and rest_credentials()[1]:
+        return "upstash-rest"
+    if tcp_redis_url():
         return "redis"
     if is_vercel():
         return "vercel-missing-redis"

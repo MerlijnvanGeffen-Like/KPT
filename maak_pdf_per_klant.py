@@ -1,4 +1,4 @@
-"""PDF-overzicht per klant (ReportLab)."""
+"""PDF-overzicht per klant en per land (ReportLab)."""
 from __future__ import annotations
 
 import io
@@ -10,8 +10,8 @@ from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
@@ -43,6 +43,7 @@ def register_font() -> str:
     candidates = [
         Path(r"C:\Windows\Fonts\arial.ttf"),
         Path(r"C:\Windows\Fonts\calibri.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
     for path in candidates:
         if path.exists():
@@ -62,7 +63,15 @@ def add_page_number(canvas, doc) -> None:
     canvas.restoreState()
 
 
-def make_pdf(target, customer: str, rows: list[dict], invoice: dict, report_name: str) -> None:
+def make_pdf(
+    target,
+    customer: str,
+    rows: list[dict],
+    invoice: dict,
+    report_name: str,
+    country: str = "",
+) -> None:
+    country = country or (rows[0].get("country") if rows else "") or "Onbekend land"
     styles = getSampleStyleSheet()
     normal = ParagraphStyle(
         "KPTNormal",
@@ -95,7 +104,7 @@ def make_pdf(target, customer: str, rows: list[dict], invoice: dict, report_name
         rightMargin=16 * mm,
         topMargin=16 * mm,
         bottomMargin=16 * mm,
-        title=f"Toloverzicht {customer}",
+        title=f"Toloverzicht {customer} - {country}",
         author="Kuijpers Transport V.O.F.",
     )
 
@@ -120,7 +129,7 @@ def make_pdf(target, customer: str, rows: list[dict], invoice: dict, report_name
         ),
         Spacer(1, 7 * mm),
         Paragraph("Toloverzicht", title),
-        Paragraph(f"<b>Klant:</b> {customer}", normal),
+        Paragraph(f"<b>Klant:</b> {customer}<br/><b>Land:</b> {country}", normal),
         Spacer(1, 6 * mm),
     ]
 
@@ -172,7 +181,7 @@ def make_pdf(target, customer: str, rows: list[dict], invoice: dict, report_name
             table,
             Spacer(1, 7 * mm),
             Paragraph(
-                f"Dit overzicht bevat uitsluitend de Nederlandse tol die aan {customer} is gekoppeld. "
+                f"Dit overzicht bevat uitsluitend de tol in {country} die aan {customer} is gekoppeld. "
                 f"Bronbestand: {report_name}.",
                 normal,
             ),
@@ -181,7 +190,13 @@ def make_pdf(target, customer: str, rows: list[dict], invoice: dict, report_name
     document.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
 
 
-def make_pdf_bytes(customer: str, rows: list[dict], invoice: dict, report_name: str) -> bytes:
+def make_pdf_bytes(
+    customer: str,
+    rows: list[dict],
+    invoice: dict,
+    report_name: str,
+    country: str = "",
+) -> bytes:
     buffer = io.BytesIO()
-    make_pdf(buffer, customer, rows, invoice, report_name)
+    make_pdf(buffer, customer, rows, invoice, report_name, country=country)
     return buffer.getvalue()

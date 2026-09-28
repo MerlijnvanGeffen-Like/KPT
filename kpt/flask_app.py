@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request, send_from_directory
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from kpt import core, storage
 
@@ -15,6 +16,12 @@ PUBLIC = ROOT / "public"
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = storage.MAX_SESSION_BYTES
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def request_too_large(_error):
+        return jsonify({
+            "error": "Upload is te groot. Comprimeer het bestand of gebruik een kleiner rapport."
+        }), 413
 
     @app.before_request
     def prepare_session():
@@ -275,11 +282,13 @@ def create_app() -> Flask:
         name = request.args.get("file") or (reports[0]["name"] if reports else "")
         invoice = request.args.get("invoice") or ""
         customer = request.args.get("customer") or ""
+        country = request.args.get("country") or ""
         try:
             import maak_pdf_per_klant as pdf
 
-            data = core.build_customer_pdf(name, invoice, customer, uploaded_files())
-            filename = f"Toloverzicht - {pdf.safe_name(customer)}.pdf"
+            data = core.build_customer_pdf(name, invoice, customer, country, uploaded_files())
+            country_label = core.normalize_country(country)
+            filename = f"Toloverzicht - {pdf.safe_name(customer)} - {pdf.safe_name(country_label)}.pdf"
             return attachment(data, filename, "application/pdf")
         except Exception as exc:
             return json_error(str(exc), 400)
@@ -310,6 +319,13 @@ def create_app() -> Flask:
             upload_file = request.files["file"]
             name = core.safe_filename(upload_file.filename or "upload.xls")
             data = upload_file.read()
+            if (request.form.get("compressed") or "").lower() == "gzip":
+                import gzip
+
+                try:
+                    data = gzip.decompress(data)
+                except OSError as exc:
+                    return json_error(f"Gzip-decompressie mislukt: {exc}", 400)
             if Path(name).suffix.lower() not in core.ALLOWED_UPLOAD:
                 return json_error("Alleen .csv, .xls, .xlsx of .pdf", 400)
             files = uploaded_files()
@@ -317,6 +333,9 @@ def create_app() -> Flask:
             previous_size = len(files.get(name, {}).get("data", b""))
             if current_size - previous_size + len(data) > storage.MAX_SESSION_BYTES:
                 return json_error("De tijdelijke sessie mag maximaal 100 MB bevatten.", 413)
+            # Vercel request-limiet ~4,5 MB: gecomprimeerde upload mag binnenkomen, daarna uitpakken.
+            if len(data) > 25 * 1024 * 1024:
+                return json_error("Dit bestand is groter dan 25 MB en kan niet worden verwerkt.", 413)
             path = Path(name)
             kind = core.detect_kind(path, data)
             expected = request.args.get("expected") or ""
