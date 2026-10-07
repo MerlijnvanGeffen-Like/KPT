@@ -9,8 +9,8 @@ import io
 import re
 import secrets
 import zipfile
-from collections import defaultdict
-from datetime import date, datetime
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -94,6 +94,13 @@ def safe_filename(name: str) -> str:
 
 def is_week_name(name: str) -> bool:
     return name.lower().startswith("week")
+
+
+def week_label(name: str) -> str:
+    match = re.search(r"week\s*(\d{1,2})\s*[-_/ ]\s*(20\d{2})", name, re.I)
+    if match:
+        return f"Week {int(match.group(1))}-{match.group(2)}"
+    return Path(name).stem or "Onbekende week"
 
 
 def cell_text(value, datemode=None) -> str:
@@ -408,7 +415,7 @@ def _sheet_date(title: str, header_cell: str) -> str | None:
         return None
 
 
-def parse_week_sheet(name: str, sheet_rows: list[list[str]], trips: list) -> None:
+def parse_week_sheet(name: str, sheet_rows: list[list[str]], trips: list, week: str) -> None:
     header = sheet_rows[0][3] if sheet_rows and len(sheet_rows[0]) > 3 else ""
     date_val = _sheet_date(name, header)
     last_customer = ""
@@ -436,6 +443,7 @@ def parse_week_sheet(name: str, sheet_rows: list[list[str]], trips: list) -> Non
             trip_number = vehicle
         trips.append(
             {
+                "week": week,
                 "date": date_val,
                 "plate": plate,
                 "plateRaw": plate_raw,
@@ -460,18 +468,20 @@ def parse_week_files(uploaded: dict) -> dict:
     )
     for path, data in sources:
         files.append(path.name)
+        week = week_label(path.name)
         try:
             for sheet_name, rows in iter_excel_sheets(path, data):
-                parse_week_sheet(sheet_name, rows, trips)
+                parse_week_sheet(sheet_name, rows, trips, week)
         except Exception as exc:
             return {"error": f"{path.name}: {exc}", "files": files, "rows": []}
 
-    grouped: dict[tuple[str, str], dict] = {}
+    grouped: dict[tuple[str, str, str], dict] = {}
     for trip in trips:
-        key = (trip["date"], trip["plate"])
+        key = (trip["week"], trip["date"], trip["plate"])
         item = grouped.setdefault(
             key,
             {
+                "week": trip["week"],
                 "date": trip["date"],
                 "plate": trip["plate"],
                 "plateRaw": trip["plateRaw"],
@@ -496,6 +506,7 @@ def parse_week_files(uploaded: dict) -> dict:
         extra = [name for name in item["customers"] if name != customer]
         rows.append(
             {
+                "week": item["week"],
                 "date": item["date"],
                 "plate": item["plate"],
                 "plateRaw": item["plateRaw"],
@@ -506,8 +517,49 @@ def parse_week_files(uploaded: dict) -> dict:
                 "extra": extra,
             }
         )
-    rows.sort(key=lambda r: (r["date"], r["plate"]))
+    rows.sort(key=lambda r: (r["week"], r["date"], r["plate"]))
     return {"files": files, "rows": rows}
+
+
+def parse_all_reports(uploaded: dict) -> tuple[list[dict], list[str]]:
+    """Voeg alle wekelijkse tolrapporten samen; dubbele transacties (zelfde ID) één keer."""
+    names = [item["name"] for item in list_report_files(uploaded)]
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for name in names:
+        for row in parse_report(name, None, uploaded):
+            key = row.get("id") or "|".join(
+                [row.get("date") or "", row.get("time") or "", row.get("plate") or "", str(row.get("eur") or 0), str(row.get("km") or 0)]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows, names
+
+
+def list_weeks(uploaded: dict) -> list[dict]:
+    planning = parse_week_files(uploaded)
+    if planning.get("error"):
+        raise ValueError(planning["error"])
+    buckets: dict[str, dict] = {}
+    for row in planning.get("rows") or []:
+        week = row["week"]
+        item = buckets.setdefault(
+            week,
+            {"id": week, "from": row["date"], "to": row["date"], "trips": 0, "plates": set()},
+        )
+        item["from"] = min(item["from"], row["date"])
+        item["to"] = max(item["to"], row["date"])
+        item["trips"] += 1
+        item["plates"].add(row["plate"])
+    out = []
+    for item in buckets.values():
+        plates = item.pop("plates")
+        item["vehicles"] = len(plates)
+        out.append(item)
+    out.sort(key=lambda week: (week["from"], week["id"]), reverse=True)
+    return out
 
 
 def detect_kind(path: Path, data: bytes | None = None) -> str:
@@ -598,42 +650,50 @@ def normalize_country(value: str) -> str:
 
 
 def build_customer_pdf_rows(
-    report_name: str, invoice_id: str, uploaded: dict
-) -> tuple[dict, dict[tuple[str, str], list[dict]]]:
-    invoices = list_invoices(report_name, uploaded)
-    invoice = next((item for item in invoices if item["id"] == invoice_id), None)
-    if not invoice:
-        raise ValueError("Factuur niet gevonden")
-
-    transactions = parse_report(report_name, invoice_id, uploaded)
+    week_id: str, uploaded: dict
+) -> tuple[dict, dict[str, list[dict]]]:
+    """Rittenboek is leidend: overzicht per klant in die week. Tol komt uit alle rapporten."""
     planning = parse_week_files(uploaded)
-    plan_map = {(row["date"], row["plate"]): row for row in planning.get("rows") or []}
-    frequency: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for plan in plan_map.values():
-        frequency[plan["plate"]][plan["customer"]] += 1
+    if planning.get("error"):
+        raise ValueError(planning["error"])
+    plan_rows = [row for row in (planning.get("rows") or []) if row["week"] == week_id]
+    if not plan_rows:
+        raise ValueError("Week niet gevonden in het rittenboek")
+
+    plan_map = {(row["date"], row["plate"]): row for row in plan_rows}
+    week_from = min(row["date"] for row in plan_rows)
+    week_to = max(row["date"] for row in plan_rows)
+    transactions, report_names = parse_all_reports(uploaded)
 
     grouped: dict[tuple[str, str, str, str], dict] = {}
+    matched_keys: set[tuple[str, str]] = set()
+    unmatched_rows = 0
+    unmatched_eur = 0.0
+
     for transaction in transactions:
         iso_date = dmy_iso(transaction.get("date") or "")
         plate = transaction["plate"]
-        country = normalize_country(transaction.get("country") or "")
         plan = plan_map.get((iso_date, plate))
-        counts = frequency.get(plate) or {}
-        fallback = max(counts.items(), key=lambda entry: entry[1])[0] if counts else ""
-        automatic_customer = plan["customer"] if plan else fallback
-        customer = automatic_customer or "Nog te verdelen"
+        if not plan:
+            if iso_date and week_from <= iso_date <= week_to:
+                unmatched_rows += 1
+                unmatched_eur += transaction["eur"]
+            continue
+        matched_keys.add((iso_date, plate))
+        country = normalize_country(transaction.get("country") or "")
+        customer = plan["customer"]
         key = (iso_date, plate, customer, country)
         item = grouped.setdefault(
             key,
             {
                 "date": datetime.strptime(iso_date, "%Y-%m-%d").date() if iso_date else None,
-                "plate": (plan.get("plateRaw") if plan else "") or transaction.get("plateRaw") or plate,
+                "plate": plan.get("plateRaw") or transaction.get("plateRaw") or plate,
                 "ritten": 0,
                 "km": 0.0,
                 "eur": 0.0,
                 "customer": customer,
                 "country": country,
-                "ritnr": (plan or {}).get("tripNumber") or "",
+                "ritnr": plan.get("tripNumber") or "",
             },
         )
         item["ritten"] += 1
@@ -642,69 +702,363 @@ def build_customer_pdf_rows(
         if "-" in (transaction.get("plateRaw") or ""):
             item["plate"] = transaction["plateRaw"]
 
-    by_group: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    by_customer: dict[str, list[dict]] = defaultdict(list)
     for item in grouped.values():
         item["km"] = round(item["km"], 1)
         item["eur"] = round(item["eur"], 2)
-        by_group[(item["customer"], item["country"])].append(item)
-    for rows in by_group.values():
-        rows.sort(key=lambda row: ((row["date"] or date.min), row["plate"]))
-    return invoice, dict(by_group)
+        if item["eur"] <= 0:
+            continue
+        by_customer[item["customer"]].append(item)
+    for rows in by_customer.values():
+        rows.sort(key=lambda row: ((row["date"] or date.min), row.get("country") or "", row["plate"]))
+
+    meta = {
+        "id": week_id,
+        "from": week_from,
+        "to": week_to,
+        "reports": report_names,
+        "planningTrips": len(plan_rows),
+        "unmatchedTollRows": unmatched_rows,
+        "unmatchedTollEur": round(unmatched_eur, 2),
+    }
+    return meta, dict(by_customer)
 
 
-def list_pdf_customers(report_name: str, invoice_id: str, uploaded: dict) -> list[dict]:
-    _invoice, by_group = build_customer_pdf_rows(report_name, invoice_id, uploaded)
-    result = []
-    for (customer, country), rows in sorted(by_group.items(), key=lambda item: (item[0][0].lower(), item[0][1].lower())):
-        result.append(
+def _week_share_of_report(
+    week_id: str,
+    plan_rows: list[dict],
+    date_counts: Counter,
+    total_rows: int,
+) -> dict:
+    """Welk deel van alle tolregels bij deze weekplanning hoort."""
+    week_dates = {row["date"] for row in plan_rows if row.get("date")}
+    covered = sum(date_counts[day] for day in week_dates)
+    percent = round(100 * covered / total_rows) if total_rows else 0
+    return {
+        "id": week_id,
+        "trips": len(plan_rows),
+        "days": len(week_dates),
+        "covered": covered,
+        "percent": percent,
+        "from": min(week_dates) if week_dates else "",
+        "to": max(week_dates) if week_dates else "",
+        "message": (
+            f"{covered} van {total_rows} tolregels ({percent}%) horen bij {week_id}"
+            + (f" ({min(week_dates)} t/m {max(week_dates)})." if week_dates else ".")
+        ),
+    }
+
+
+def _collapse_day_ranges(days: list[str]) -> list[dict]:
+    parsed = sorted(datetime.strptime(day, "%Y-%m-%d").date() for day in days)
+    if not parsed:
+        return []
+    ranges = []
+    start = prev = parsed[0]
+    for day in parsed[1:]:
+        if day == prev + timedelta(days=1):
+            prev = day
+            continue
+        ranges.append({"from": start.isoformat(), "to": prev.isoformat()})
+        start = prev = day
+    ranges.append({"from": start.isoformat(), "to": prev.isoformat()})
+    return ranges
+
+
+def _calendar_days(
+    report_from: str,
+    report_to: str,
+    plan_rows: list[dict],
+    date_counts: Counter,
+) -> list[dict]:
+    week_by_date: dict[str, str] = {}
+    for row in plan_rows:
+        day = row.get("date") or ""
+        if day and day not in week_by_date:
+            week_by_date[day] = row.get("week") or ""
+    start = datetime.strptime(report_from, "%Y-%m-%d").date()
+    end = datetime.strptime(report_to, "%Y-%m-%d").date()
+    days = []
+    cursor = start
+    while cursor <= end:
+        iso = cursor.isoformat()
+        days.append(
             {
-                "customer": customer,
-                "country": country,
-                "rows": len(rows),
-                "trips": sum(row["ritten"] for row in rows),
-                "km": round(sum(row["km"] for row in rows), 1),
-                "eur": round(sum(row["eur"] for row in rows), 2),
-                "missingTripNumbers": sum(not row["ritnr"] for row in rows),
+                "date": iso,
+                "inPlanning": iso in week_by_date,
+                "inReport": iso in date_counts,
+                "rows": int(date_counts.get(iso, 0)),
+                "week": week_by_date.get(iso, ""),
             }
         )
-    return result
+        cursor += timedelta(days=1)
+    return days
 
 
-def build_customer_pdf(
-    report_name: str, invoice_id: str, customer: str, country: str, uploaded: dict
-) -> bytes:
+def _missing_report_ranges(report_from: str, report_to: str, plan_dates: set[str], date_counts: Counter) -> list[dict]:
+    start = datetime.strptime(report_from, "%Y-%m-%d").date()
+    end = datetime.strptime(report_to, "%Y-%m-%d").date()
+    missing_days = []
+    cursor = start
+    while cursor <= end:
+        iso = cursor.isoformat()
+        if iso not in plan_dates:
+            missing_days.append(iso)
+        cursor += timedelta(days=1)
+    ranges = _collapse_day_ranges(missing_days)
+    for item in ranges:
+        item["rows"] = sum(count for day, count in date_counts.items() if item["from"] <= day <= item["to"])
+    return ranges
+
+
+def check_reports_against_planning(uploaded: dict) -> dict:
+    """Dekking van alle tolrapporten tegen alle geüploade weekplanningen samen."""
+    planning = parse_week_files(uploaded)
+    if planning.get("error"):
+        raise ValueError(planning["error"])
+    plan_rows = planning.get("rows") or []
+    week_ids = sorted({row["week"] for row in plan_rows})
+    plan_dates = {row["date"] for row in plan_rows}
+    plan_keys = {(row["date"], row["plate"]) for row in plan_rows}
+    report_files = list_report_files(uploaded)
+
+    empty = {
+        "weeks": week_ids,
+        "planningFrom": min(plan_dates) if plan_dates else "",
+        "planningTo": max(plan_dates) if plan_dates else "",
+        "planningDays": len(plan_dates),
+        "planningTrips": len(plan_rows),
+        "reports": [],
+        "totals": {
+            "status": "warning",
+            "message": "Upload tolrapporten én weekplanningen om te zien hoeveel je nog mist.",
+            "rows": 0,
+            "covered": 0,
+            "missing": 0,
+            "matched": 0,
+            "percent": 0,
+        },
+        "planning": {"trips": 0, "days": 0, "covered": 0, "percent": 0, "message": ""},
+        "weeksDetail": [],
+        "timeline": {"reportFrom": "", "reportTo": "", "missing": [], "days": []},
+    }
+    if not plan_rows or not report_files:
+        return empty
+
+    checks = []
+    total_rows = 0
+    total_covered = 0
+    total_matched = 0
+    report_keys: set[tuple[str, str]] = set()
+    date_counts: Counter = Counter()
+    week_names = ", ".join(week_ids)
+    plan_span = f"{min(plan_dates)} t/m {max(plan_dates)}"
+
+    for file_info in report_files:
+        name = file_info["name"]
+        dated = []
+        covered = 0
+        matched = 0
+        for row in parse_report(name, None, uploaded):
+            iso = dmy_iso(row.get("date") or "")
+            if not iso:
+                continue
+            dated.append(iso)
+            date_counts[iso] += 1
+            report_keys.add((iso, row["plate"]))
+            if iso in plan_dates:
+                covered += 1
+                if (iso, row["plate"]) in plan_keys:
+                    matched += 1
+        total = len(dated)
+        missing = total - covered
+        pct = round(100 * covered / total) if total else 0
+        if total == 0:
+            status = "warning"
+            message = f"{name}: geen transactiedatums gevonden."
+        elif covered == 0:
+            status = "mismatch"
+            message = (
+                f"{name}: 0 van {total} regels vallen in de geüploade weekplanningen ({week_names}, {plan_span}). "
+                f"Nog {missing} te gaan. Tolperiode: {min(dated)} t/m {max(dated)}."
+            )
+        elif missing == 0:
+            status = "ok"
+            message = (
+                f"{name}: alle {total} regels vallen in de geüploade weekplanningen ({week_names}). "
+                f"{matched} gekoppeld op kenteken."
+            )
+        else:
+            status = "ok" if pct >= 85 else "warning"
+            message = (
+                f"{name}: {covered} van {total} regels ({pct}%) vallen in de geüploade weekplanningen "
+                f"({week_names}, {plan_span}). Nog {missing} regels missen een weekplanning. "
+                f"Tolperiode: {min(dated)} t/m {max(dated)}."
+            )
+        checks.append(
+            {
+                "name": name,
+                "status": status,
+                "message": message,
+                "from": min(dated) if dated else "",
+                "to": max(dated) if dated else "",
+                "rows": total,
+                "covered": covered,
+                "missing": missing,
+                "matched": matched,
+                "percent": pct,
+            }
+        )
+        total_rows += total
+        total_covered += covered
+        total_matched += matched
+
+    missing = total_rows - total_covered
+    pct = round(100 * total_covered / total_rows) if total_rows else 0
+    if missing == 0:
+        totals_status = "ok"
+        totals_message = (
+            f"Alle {total_rows} tolregels vallen in de geüploade weekplanningen ({week_names}). "
+            f"{total_matched} gekoppeld op kenteken."
+        )
+    elif total_covered == 0:
+        totals_status = "mismatch"
+        totals_message = (
+            f"Nog niets gedekt: 0 van {total_rows} tolregels vallen in {week_names} ({plan_span}). "
+            f"Upload de weekplanningen die bij de tolperiode horen."
+        )
+    else:
+        totals_status = "ok" if pct >= 85 else "warning"
+        totals_message = (
+            f"Samen: {total_covered} van {total_rows} tolregels ({pct}%) vallen in de geüploade weekplanningen "
+            f"({week_names}, {plan_span}). Nog {missing} regels missen een weekplanning."
+        )
+
+    return {
+        "weeks": week_ids,
+        "planningFrom": min(plan_dates),
+        "planningTo": max(plan_dates),
+        "planningDays": len(plan_dates),
+        "planningTrips": len(plan_rows),
+        "reports": checks,
+        "totals": {
+            "status": totals_status,
+            "message": totals_message,
+            "rows": total_rows,
+            "covered": total_covered,
+            "missing": missing,
+            "matched": total_matched,
+            "percent": pct,
+        },
+        "weeksDetail": [
+            _week_share_of_report(
+                week_id,
+                [row for row in plan_rows if row["week"] == week_id],
+                date_counts,
+                total_rows,
+            )
+            for week_id in dict.fromkeys(week_ids)
+        ],
+        "timeline": {
+            "reportFrom": min(date_counts) if date_counts else "",
+            "reportTo": max(date_counts) if date_counts else "",
+            "missing": _missing_report_ranges(min(date_counts), max(date_counts), plan_dates, date_counts)
+            if date_counts
+            else [],
+            "days": _calendar_days(min(date_counts), max(date_counts), plan_rows, date_counts)
+            if date_counts
+            else [],
+        },
+    }
+
+
+def check_reports_for_week(week_id: str, uploaded: dict, plan_rows: list[dict] | None = None) -> list[dict]:
+    """Blijft beschikbaar: dekt alle planningen, genegeerde week_id."""
+    return check_reports_against_planning(uploaded).get("reports") or []
+
+
+def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
+    meta, by_customer = build_customer_pdf_rows(week_id, uploaded)
+    merged: dict[str, dict] = {}
+    for customer, rows in by_customer.items():
+        eur = round(sum(row["eur"] for row in rows), 2)
+        if eur <= 0:
+            continue
+        key = customer.lower()
+        item = merged.setdefault(
+            key,
+            {
+                "customer": customer,
+                "countries": set(),
+                "rows": 0,
+                "trips": 0,
+                "km": 0.0,
+                "eur": 0.0,
+            },
+        )
+        item["countries"].update(row["country"] for row in rows if row.get("country"))
+        item["rows"] += len(rows)
+        item["trips"] += sum(row["ritten"] for row in rows)
+        item["km"] += sum(row["km"] for row in rows)
+        item["eur"] += eur
+    customers = []
+    for item in sorted(merged.values(), key=lambda row: row["customer"].lower()):
+        countries = sorted(item["countries"])
+        customers.append(
+            {
+                "customer": item["customer"],
+                "country": ", ".join(countries),
+                "countries": countries,
+                "rows": item["rows"],
+                "trips": item["trips"],
+                "km": round(item["km"], 1),
+                "eur": round(item["eur"], 2),
+            }
+        )
+    return {
+        **meta,
+        "customers": customers,
+        "coverage": check_reports_against_planning(uploaded),
+    }
+
+
+def build_customer_pdf(week_id: str, customer: str, country: str, uploaded: dict) -> bytes:
     import maak_pdf_per_klant as pdf
 
-    invoice, by_group = build_customer_pdf_rows(report_name, invoice_id, uploaded)
-    country = normalize_country(country)
-    rows = by_group.get((customer, country))
+    meta, by_customer = build_customer_pdf_rows(week_id, uploaded)
+    rows = by_customer.get(customer)
     if not rows:
-        raise ValueError("Klant/land-combinatie niet gevonden in deze factuur")
-    return pdf.make_pdf_bytes(customer, rows, invoice, report_name, country=country)
+        raise ValueError("Klant niet gevonden in deze week van het rittenboek")
+    if country:
+        wanted = normalize_country(country)
+        rows = [row for row in rows if row.get("country") == wanted]
+        if not rows:
+            raise ValueError("Deze klant heeft in deze week geen tol in dat land")
+    source = ", ".join(meta.get("reports") or []) or "rittenboek"
+    return pdf.make_pdf_bytes(customer, rows, meta, source)
 
 
-def build_customer_zip(report_name: str, invoice_id: str | None, uploaded: dict) -> bytes:
+def build_customer_zip(week_id: str | None, uploaded: dict) -> bytes:
     import maak_pdf_per_klant as pdf
 
-    invoices = list_invoices(report_name, uploaded)
-    if invoice_id and invoice_id != "alles":
-        invoices = [item for item in invoices if item["id"] == invoice_id]
-    if not invoices:
-        raise ValueError("Geen facturen gevonden")
+    weeks = list_weeks(uploaded)
+    if week_id and week_id != "alles":
+        weeks = [item for item in weeks if item["id"] == week_id]
+    if not weeks:
+        raise ValueError("Geen week gevonden in het rittenboek")
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for invoice in invoices:
-            current, by_group = build_customer_pdf_rows(report_name, invoice["id"], uploaded)
-            folder = f"Factuur {pdf.safe_name(current['id'])}"
-            if current.get("date"):
-                folder += " - " + current["date"].replace("/", "-")
-            for (customer, country), rows in sorted(
-                by_group.items(), key=lambda item: (item[0][0].lower(), item[0][1].lower())
-            ):
-                filename = f"Toloverzicht - {pdf.safe_name(customer)} - {pdf.safe_name(country)}.pdf"
+        for week in weeks:
+            current, by_customer = build_customer_pdf_rows(week["id"], uploaded)
+            folder = pdf.safe_name(current["id"])
+            source = ", ".join(current.get("reports") or []) or "rittenboek"
+            for customer, rows in sorted(by_customer.items(), key=lambda item: item[0].lower()):
+                if round(sum(row["eur"] for row in rows), 2) <= 0:
+                    continue
+                filename = f"Toloverzicht - {pdf.safe_name(current['id'])} - {pdf.safe_name(customer)}.pdf"
                 archive.writestr(
                     f"{folder}/{filename}",
-                    pdf.make_pdf_bytes(customer, rows, current, report_name, country=country),
+                    pdf.make_pdf_bytes(customer, rows, current, source),
                 )
     return buffer.getvalue()

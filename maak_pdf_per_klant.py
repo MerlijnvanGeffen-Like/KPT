@@ -71,7 +71,8 @@ def make_pdf(
     report_name: str,
     country: str = "",
 ) -> None:
-    country = country or (rows[0].get("country") if rows else "") or "Onbekend land"
+    countries = sorted({row.get("country") for row in rows if row.get("country")})
+    country_label = country or ", ".join(countries) or "—"
     styles = getSampleStyleSheet()
     normal = ParagraphStyle(
         "KPTNormal",
@@ -97,6 +98,10 @@ def make_pdf(
         leading=9,
     )
 
+    week_id = invoice.get("id") or "Week"
+    inv_label = week_id if str(week_id).lower().startswith("week") else f"Rittenboek {week_id}"
+    period = f"{invoice.get('from') or '-'} t/m {invoice.get('to') or '-'}"
+
     document = SimpleDocTemplate(
         target if hasattr(target, "write") else str(target),
         pagesize=A4,
@@ -104,13 +109,9 @@ def make_pdf(
         rightMargin=16 * mm,
         topMargin=16 * mm,
         bottomMargin=16 * mm,
-        title=f"Toloverzicht {customer} - {country}",
+        title=f"Toloverzicht {week_id} - {customer}",
         author="Kuijpers Transport V.O.F.",
     )
-
-    inv_id = invoice.get("id") or "ongefactureerd"
-    inv_label = "Nog niet gefactureerd" if inv_id == "ongefactureerd" else f"MSTS-factuur {inv_id}"
-    period = f"{invoice.get('from') or '-'} t/m {invoice.get('to') or '-'}"
 
     story = [
         Table(
@@ -129,18 +130,21 @@ def make_pdf(
         ),
         Spacer(1, 7 * mm),
         Paragraph("Toloverzicht", title),
-        Paragraph(f"<b>Klant:</b> {customer}<br/><b>Land:</b> {country}", normal),
+        Paragraph(
+            f"<b>Klant:</b> {customer}<br/><b>Land:</b> {country_label}",
+            normal,
+        ),
         Spacer(1, 6 * mm),
     ]
 
-    data = [["Datum", "Kenteken", "Ritnummer", "Ritten", "KM tolweg", "Tol"]]
+    data = [["Datum", "Kenteken", "Ritnummer", "Land", "KM tolweg", "Tol"]]
     for row in rows:
         data.append(
             [
                 row["date"].strftime("%d-%m-%Y") if row.get("date") else "",
                 row.get("plate") or "",
-                Paragraph((row.get("ritnr") or "").replace(" / ", "<br/>"), table_text),
-                str(row.get("ritten") or 0),
+                Paragraph((row.get("ritnr") or "—").replace(" / ", "<br/>"), table_text),
+                row.get("country") or "—",
                 number(row.get("km") or 0),
                 euro(row.get("eur") or 0),
             ]
@@ -148,12 +152,11 @@ def make_pdf(
 
     total_km = round(sum(row.get("km") or 0 for row in rows), 1)
     total_eur = round(sum(row.get("eur") or 0 for row in rows), 2)
-    total_trips = sum(row.get("ritten") or 0 for row in rows)
-    data.append(["", "", "Totaal", str(total_trips), number(total_km), euro(total_eur)])
+    data.append(["", "", "Totaal", "", number(total_km), euro(total_eur)])
 
     table = Table(
         data,
-        colWidths=[24 * mm, 29 * mm, 42 * mm, 18 * mm, 29 * mm, 30 * mm],
+        colWidths=[24 * mm, 28 * mm, 38 * mm, 28 * mm, 28 * mm, 26 * mm],
         repeatRows=1,
         hAlign="LEFT",
     )
@@ -165,7 +168,7 @@ def make_pdf(
                 ("BACKGROUND", (0, 0), (-1, 0), BLUE),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONTNAME", (0, 0), (-1, 0), FONT),
-                ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+                ("ALIGN", (4, 1), (-1, -1), "RIGHT"),
                 ("GRID", (0, 0), (-1, -2), 0.35, colors.HexColor("#CBD5DC")),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F6F8FA")]),
                 ("BACKGROUND", (0, -1), (-1, -1), LIGHT_BLUE),
@@ -181,8 +184,10 @@ def make_pdf(
             table,
             Spacer(1, 7 * mm),
             Paragraph(
-                f"Dit overzicht bevat uitsluitend de tol in {country} die aan {customer} is gekoppeld. "
-                f"Bronbestand: {report_name}.",
+                f"Dit overzicht volgt het rittenboek ({inv_label}) voor {customer}. "
+                f"Alleen tol die op datum en kenteken in het rittenboek staat, is meegenomen. "
+                f"Regels zonder bedrag zitten wel in het rittenboek, maar nog niet in de tolrapporten. "
+                f"Bron: {report_name}.",
                 normal,
             ),
         ]

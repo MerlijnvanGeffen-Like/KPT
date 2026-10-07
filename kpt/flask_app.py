@@ -235,6 +235,16 @@ def create_app() -> Flask:
             return denied
         return jsonify({"files": core.list_invoice_pdf_info(uploaded_files())})
 
+    @app.get("/api/weeks")
+    def weeks():
+        denied = require_auth()
+        if denied:
+            return denied
+        try:
+            return jsonify({"weeks": core.list_weeks(uploaded_files())})
+        except Exception as exc:
+            return json_error(str(exc), 400)
+
     @app.get("/api/invoices")
     def invoices():
         denied = require_auth()
@@ -251,12 +261,25 @@ def create_app() -> Flask:
         denied = require_auth()
         if denied:
             return denied
-        reports = core.list_report_files(uploaded_files())
-        name = request.args.get("file") or (reports[0]["name"] if reports else "")
-        invoice = request.args.get("invoice") or ""
+        week = request.args.get("week") or ""
         try:
-            customers = core.list_pdf_customers(name, invoice, uploaded_files())
-            return jsonify({"file": name, "invoice": invoice, "customers": customers})
+            if not week:
+                weeks = core.list_weeks(uploaded_files())
+                week = weeks[0]["id"] if weeks else ""
+            if not week:
+                return json_error("Upload eerst een weekplanning (rittenboek).", 400)
+            payload = core.list_pdf_customers(week, uploaded_files())
+            return jsonify(payload)
+        except Exception as exc:
+            return json_error(str(exc), 400)
+
+    @app.get("/api/week-check")
+    def week_check():
+        denied = require_auth()
+        if denied:
+            return denied
+        try:
+            return jsonify(core.check_reports_against_planning(uploaded_files()))
         except Exception as exc:
             return json_error(str(exc), 400)
 
@@ -278,17 +301,17 @@ def create_app() -> Flask:
         denied = require_auth()
         if denied:
             return denied
-        reports = core.list_report_files(uploaded_files())
-        name = request.args.get("file") or (reports[0]["name"] if reports else "")
-        invoice = request.args.get("invoice") or ""
+        week = request.args.get("week") or ""
         customer = request.args.get("customer") or ""
         country = request.args.get("country") or ""
         try:
             import maak_pdf_per_klant as pdf
 
-            data = core.build_customer_pdf(name, invoice, customer, country, uploaded_files())
-            country_label = core.normalize_country(country)
-            filename = f"Toloverzicht - {pdf.safe_name(customer)} - {pdf.safe_name(country_label)}.pdf"
+            if not week:
+                weeks = core.list_weeks(uploaded_files())
+                week = weeks[0]["id"] if weeks else ""
+            data = core.build_customer_pdf(week, customer, country, uploaded_files())
+            filename = f"Toloverzicht - {pdf.safe_name(week)} - {pdf.safe_name(customer)}.pdf"
             return attachment(data, filename, "application/pdf")
         except Exception as exc:
             return json_error(str(exc), 400)
@@ -298,12 +321,10 @@ def create_app() -> Flask:
         denied = require_auth()
         if denied:
             return denied
-        reports = core.list_report_files(uploaded_files())
-        name = request.args.get("file") or (reports[0]["name"] if reports else "")
-        invoice = request.args.get("invoice") or ""
+        week = request.args.get("week") or ""
         try:
-            data = core.build_customer_zip(name, invoice or None, uploaded_files())
-            suffix = invoice or "alle_facturen"
+            data = core.build_customer_zip(week or None, uploaded_files())
+            suffix = week or "alle_weken"
             return attachment(data, f"Toloverzichten_{suffix}.zip", "application/zip")
         except Exception as exc:
             return json_error(str(exc), 400)
@@ -344,8 +365,6 @@ def create_app() -> Flask:
                 return json_error(f"{name} is geen geldig {labels[expected]}.", 400)
             if kind == "unknown":
                 return json_error(f"{name} wordt niet herkend als tolrapport, weekplanning of factuur-PDF.", 400)
-            if kind == "report" and any(item.get("kind") == "report" for item in files.values()):
-                files.clear()
             files[name] = {"data": data, "mtime": time.time(), "kind": kind}
             g.session["files"] = files
             return jsonify({"ok": True, "name": name, "kind": kind})

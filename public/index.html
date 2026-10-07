@@ -42,31 +42,31 @@
     <main class="page">
       <section class="intro">
         <h1>PDF-overzichten maken</h1>
-        <p>Upload hieronder het tolrapport en de bijbehorende weekplanningen.</p>
+        <p>Het rittenboek (weekplanning) is leidend. Vul daarna één of meer wekelijkse tolrapporten aan tot de week compleet is.</p>
       </section>
 
       <section class="upload-section">
         <div class="upload-grid">
-          <div id="reportDropZone" class="upload-box">
-            <span class="upload-number">1</span>
-            <h2>Tolrapport</h2>
-            <p>Het MSTS/Telepass-rapport als CSV, XLS of XLSX.</p>
-            <label class="button button-primary">
-              Tolrapport kiezen
-              <input id="reportInput" type="file" accept=".csv,.xls,.xlsx" hidden />
-            </label>
-            <small>of sleep het bestand hierheen</small>
-          </div>
-
           <div id="planningDropZone" class="upload-box">
-            <span class="upload-number">2</span>
-            <h2>Weekplanningen</h2>
-            <p>Alle relevante <code>Week xx-2026.xls</code>-bestanden.</p>
-            <label class="button">
+            <span class="upload-number">1</span>
+            <h2>Rittenboek</h2>
+            <p>De <code>Week xx-2026.xls</code>-bestanden. Die bepalen week, klant en ritnummer.</p>
+            <label class="button button-primary">
               Weekplanningen kiezen
               <input id="planningInput" type="file" accept=".xls,.xlsx" multiple hidden />
             </label>
-            <small>je kunt meerdere bestanden tegelijk kiezen</small>
+            <small>je kunt meerdere weken tegelijk kiezen</small>
+          </div>
+
+          <div id="reportDropZone" class="upload-box">
+            <span class="upload-number">2</span>
+            <h2>Wekelijkse rapporten</h2>
+            <p>MSTS/Telepass-CSV’s. Meerdere rapporten vullen samen één week.</p>
+            <label class="button">
+              Tolrapporten kiezen
+              <input id="reportInput" type="file" accept=".csv,.xls,.xlsx" multiple hidden />
+            </label>
+            <small>je kunt meerdere rapporten tegelijk kiezen</small>
           </div>
 
           <div id="invoiceDropZone" class="upload-box upload-box-optional">
@@ -86,8 +86,8 @@
 
         <div id="sourceStatus" class="source-status" hidden>
           <div>
-            <strong id="reportName">Nog geen tolrapport</strong>
-            <span id="planningFiles">Geen weekplanningen</span>
+            <strong id="planningFiles">Nog geen rittenboek</strong>
+            <span id="reportName">Geen tolrapporten</span>
             <span id="invoiceFile">Geen factuur-PDF</span>
           </div>
           <button id="clearSessionBtn" class="text-button" type="button">Wissen</button>
@@ -100,30 +100,30 @@
         <div class="results-head">
           <div>
             <h2>Bedrijven</h2>
-            <p>Per bedrijf en per land een aparte PDF.</p>
+            <p>Kies een week. Per klant een PDF op basis van het rittenboek.</p>
           </div>
           <label>
-            Factuur
-            <select id="invoiceSelect"></select>
+            Week
+            <select id="weekSelect"></select>
           </label>
         </div>
 
         <div class="toolbar">
-          <button id="zipInvoiceBtn" class="button button-primary" type="button">Alles downloaden als ZIP</button>
+          <button id="zipInvoiceBtn" class="button button-primary" type="button">Deze week als ZIP</button>
           <input id="searchInput" type="search" placeholder="Zoek bedrijf of land…" />
         </div>
 
         <div id="summary" class="summary"></div>
+        <div id="weekCheck" class="week-check" hidden></div>
         <div id="invoiceCheck" class="invoice-check" hidden></div>
 
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Bedrijf</th>
-                <th>Land</th>
+                <th>Klant</th>
+                <th>Landen</th>
                 <th class="number">Tol</th>
-                <th class="number">Zonder ritnummer</th>
                 <th></th>
               </tr>
             </thead>

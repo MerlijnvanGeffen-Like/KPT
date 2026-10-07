@@ -305,6 +305,125 @@ label input[type="text"], label input[type="password"] { display: block; width: 
 
 .invoice-check.ok { color: #166534; background: #f0fdf4; }
 .invoice-check.warning { color: #92400e; background: #fffbeb; }
+.invoice-check.mismatch { color: #991b1b; background: #fef2f2; }
+
+.week-check {
+  margin: 0 0 16px;
+}
+.week-check[hidden] { display: none; }
+
+.coverage-card {
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--red);
+  border-radius: 10px;
+  padding: 16px 18px;
+  background: var(--paper);
+}
+.coverage-block + .coverage-block {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.coverage-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+.coverage-head strong { color: var(--ink); }
+.coverage-legend {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.coverage-legend b { color: var(--ink); }
+.coverage-track {
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--line);
+}
+.coverage-filled {
+  display: block;
+  height: 100%;
+  background: var(--red);
+  min-width: 0;
+}
+.coverage-note {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.cal-wrap {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.cal-month h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  text-transform: capitalize;
+}
+.cal-weekdays,
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+}
+.cal-weekdays span {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  text-transform: uppercase;
+}
+.cal-day {
+  display: grid;
+  min-height: 32px;
+  place-items: center;
+  border-radius: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.cal-day.empty { background: transparent; }
+.cal-day.idle { background: var(--soft); }
+.cal-day.missing {
+  color: var(--ink);
+  background: #f3f4f6;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.cal-day.planned {
+  color: #fff;
+  background: var(--red);
+  font-weight: 650;
+}
+.cal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.cal-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  border-radius: 3px;
+  vertical-align: -2px;
+}
+.cal-legend i.planned { background: var(--red); }
+.cal-legend i.missing { background: #f3f4f6; box-shadow: inset 0 0 0 1px var(--line); }
+.cal-legend i.idle { background: var(--soft); }
+.coverage-chip {
+  color: var(--muted);
+  font-size: 12px;
+}
+.coverage-chip b { color: var(--ink); }
 
 .table-wrap {
   overflow: auto;

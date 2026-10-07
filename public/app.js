@@ -37,10 +37,11 @@ const els = {
   reportName: document.getElementById("reportName"),
   planningFiles: document.getElementById("planningFiles"),
   invoiceFile: document.getElementById("invoiceFile"),
-  invoiceSelect: document.getElementById("invoiceSelect"),
+  weekSelect: document.getElementById("weekSelect"),
   zipInvoiceBtn: document.getElementById("zipInvoiceBtn"),
   searchInput: document.getElementById("searchInput"),
   summary: document.getElementById("summary"),
+  weekCheck: document.getElementById("weekCheck"),
   invoiceCheck: document.getElementById("invoiceCheck"),
   sourceStatus: document.getElementById("sourceStatus"),
   resultsSection: document.getElementById("resultsSection"),
@@ -48,9 +49,10 @@ const els = {
 };
 
 let reports = [];
-let invoices = [];
+let weeks = [];
 let companies = [];
-let activeReport = "";
+let weekMeta = {};
+let coverage = { reports: [], totals: null };
 let authState = { setupRequired: false, authenticated: false, username: "", admin: false };
 let loadingHideTimer = null;
 
@@ -65,6 +67,56 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value);
+}
+
+function formatIso(value) {
+  if (!value) return "—";
+  const [year, month, day] = String(value).split("-");
+  if (!day) return value;
+  return `${day}-${month}-${year}`;
+}
+
+function monthTitle(yearMonth) {
+  const [year, month] = yearMonth.split("-");
+  const names = ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
+  return `${names[Number(month) - 1] || month} ${year}`;
+}
+
+function renderCalendar(days) {
+  if (!days.length) return "";
+  const byMonth = new Map();
+  days.forEach((day) => {
+    const key = day.date.slice(0, 7);
+    if (!byMonth.has(key)) byMonth.set(key, []);
+    byMonth.get(key).push(day);
+  });
+  const weekday = ["ma", "di", "wo", "do", "vr", "za", "zo"];
+  const months = [...byMonth.entries()].map(([key, monthDays]) => {
+    const first = new Date(`${monthDays[0].date}T12:00:00`);
+    const mondayIndex = (first.getDay() + 6) % 7;
+    const pads = Array.from({ length: mondayIndex }, () => "<span class=\"cal-day empty\"></span>");
+    const cells = monthDays.map((day) => {
+      const number = Number(day.date.slice(8, 10));
+      const state = day.inPlanning ? "planned" : day.inReport ? "missing" : "idle";
+      const title = day.inPlanning
+        ? `${formatIso(day.date)} · ${day.week || "rittenboek"}`
+        : day.inReport
+          ? `${formatIso(day.date)} · ${day.rows} tolregels, nog geen weekplanning`
+          : formatIso(day.date);
+      return `<span class="cal-day ${state}" title="${escapeAttr(title)}">${number}</span>`;
+    });
+    return `<div class="cal-month">
+      <h3>${monthTitle(key)}</h3>
+      <div class="cal-weekdays">${weekday.map((name) => `<span>${name}</span>`).join("")}</div>
+      <div class="cal-grid">${pads.join("")}${cells.join("")}</div>
+    </div>`;
+  }).join("");
+  return `<div class="cal-wrap">${months}</div>
+    <div class="cal-legend">
+      <span><i class="planned"></i> Weekplanning geüpload</span>
+      <span><i class="missing"></i> Tolrapport, nog geen weekplanning</span>
+      <span><i class="idle"></i> Geen tol die dag</span>
+    </div>`;
 }
 
 async function readJson(response) {
@@ -216,9 +268,10 @@ async function logout() {
   await fetch("/api/auth/logout", { method: "POST" });
   authState = { setupRequired: false, authenticated: false, username: "", admin: false };
   reports = [];
-  invoices = [];
+  weeks = [];
   companies = [];
-  activeReport = "";
+  weekMeta = {};
+  coverage = { reports: [], totals: null };
   showAuthentication();
 }
 
@@ -280,99 +333,61 @@ async function deleteUser(username) {
   }
 }
 
-function selectedReport() {
-  return activeReport;
+function selectedWeek() {
+  return els.weekSelect.value || "";
 }
 
-function selectedInvoice() {
-  return els.invoiceSelect.value || "";
-}
-
-async function loadSources(preferredReport = "") {
-  const [fileData, planningData, invoiceData] = await Promise.all([
+async function loadSources() {
+  const [fileData, planningData, invoiceData, weekData, coverageData] = await Promise.all([
     getJson("/api/files"),
     getJson("/api/planning"),
     getJson("/api/invoice-files"),
+    getJson("/api/weeks").catch(() => ({ weeks: [] })),
+    getJson("/api/week-check").catch(() => ({ reports: [], totals: null })),
   ]);
+  coverage = coverageData || { reports: [], totals: null };
   reports = fileData.files || [];
-  activeReport = reports.some((item) => item.name === preferredReport)
-    ? preferredReport
-    : (reports[0]?.name || "");
-  els.reportName.textContent = activeReport || "Nog niet geüpload";
+  els.reportName.textContent = reports.length
+    ? `${reports.length} rapport${reports.length === 1 ? "" : "en"}: ${reports.map((item) => item.name).join(", ")}`
+    : "Geen tolrapporten";
 
   const weekFiles = planningData.files || [];
   els.planningFiles.textContent = weekFiles.length
-    ? `${weekFiles.length} bestanden: ${weekFiles.join(", ")}`
-    : "Geen weekplanningen gevonden";
+    ? `Rittenboek: ${weekFiles.join(", ")}`
+    : "Nog geen rittenboek";
   const invoiceFiles = invoiceData.files || [];
   els.invoiceFile.textContent = invoiceFiles.length
     ? `Factuur-PDF: ${invoiceFiles.map((file) => file.name).join(", ")}`
     : "Geen factuur-PDF";
-  els.sourceStatus.hidden = !activeReport && !weekFiles.length && !invoiceFiles.length;
+  els.sourceStatus.hidden = !reports.length && !weekFiles.length && !invoiceFiles.length;
 
-  await loadInvoices();
-}
-
-async function loadInvoices() {
-  const report = selectedReport();
-  if (!report) {
-    invoices = [];
-    companies = [];
-    els.invoiceSelect.innerHTML = "";
-    els.invoiceSelect.disabled = true;
-    renderCompanies();
-    return;
-  }
-
-  els.invoiceSelect.disabled = false;
-  const data = await getJson("/api/invoices?file=" + encodeURIComponent(report));
-  invoices = data.invoices || [];
-  els.invoiceSelect.innerHTML = invoices.map((invoice) => {
-    const title = invoice.id === "ongefactureerd"
-      ? "Nog niet gefactureerd"
-      : `Factuur ${invoice.id}${invoice.date ? ` (${invoice.date})` : ""}`;
-    const period = invoice.from && invoice.to ? ` · ${invoice.from} t/m ${invoice.to}` : "";
-    return `<option value="${escapeAttr(invoice.id)}">${escapeHtml(title + period)}</option>`;
+  weeks = weekData.weeks || [];
+  const previous = selectedWeek();
+  els.weekSelect.disabled = weeks.length === 0;
+  els.weekSelect.innerHTML = weeks.map((week) => {
+    const period = week.from && week.to ? ` · ${week.from} t/m ${week.to}` : "";
+    return `<option value="${escapeAttr(week.id)}">${escapeHtml(`${week.id}${period}`)}</option>`;
   }).join("");
+  if (previous && weeks.some((week) => week.id === previous)) {
+    els.weekSelect.value = previous;
+  }
   await loadCompanies();
 }
 
 async function loadCompanies() {
-  const report = selectedReport();
-  const invoice = selectedInvoice();
-  if (!report || !invoice) {
+  const week = selectedWeek();
+  if (!week) {
     companies = [];
+    weekMeta = {};
     renderCompanies();
     return;
   }
 
-  els.companyRows.innerHTML = `<tr><td colspan="5" class="loading">Bedrijven laden…</td></tr>`;
-  const url = "/api/pdf-customers?file=" + encodeURIComponent(report)
-    + "&invoice=" + encodeURIComponent(invoice);
-  const data = await getJson(url);
+  els.companyRows.innerHTML = `<tr><td colspan="4" class="loading">Bedrijven laden…</td></tr>`;
+  const data = await getJson("/api/pdf-customers?week=" + encodeURIComponent(week));
   companies = data.customers || [];
+  weekMeta = data;
   renderCompanies();
-  await loadInvoiceCheck();
-}
-
-async function loadInvoiceCheck() {
-  const report = selectedReport();
-  const invoice = selectedInvoice();
-  if (!report || !invoice) {
-    els.invoiceCheck.hidden = true;
-    return;
-  }
-  const url = "/api/invoice-check?file=" + encodeURIComponent(report)
-    + "&invoice=" + encodeURIComponent(invoice);
-  const data = await getJson(url);
-  if (!data.uploaded || !data.message) {
-    els.invoiceCheck.hidden = true;
-    return;
-  }
-  const prefix = data.match ? `${data.match.name}: ` : "";
-  els.invoiceCheck.textContent = prefix + data.message;
-  els.invoiceCheck.className = `invoice-check ${data.status || ""}`.trim();
-  els.invoiceCheck.hidden = false;
 }
 
 function renderCompanies() {
@@ -382,53 +397,79 @@ function renderCompanies() {
     return haystack.includes(query);
   });
   const total = companies.reduce((sum, item) => sum + item.eur, 0);
-  const missing = companies.reduce((sum, item) => sum + item.missingTripNumbers, 0);
-  const countries = new Set(companies.map((item) => item.country).filter(Boolean));
 
-  els.summary.innerHTML = companies.length
-    ? `<span><b>${companies.length}</b> overzichten</span>
-       <span><b>${countries.size}</b> landen</span>
-       <span><b>${euro.format(total)}</b> tol</span>
-       <span class="${missing ? "warning-text" : ""}"><b>${missing}</b> regels zonder ritnummer</span>`
+  els.summary.innerHTML = selectedWeek()
+    ? `<span><b>${companies.length}</b> klanten</span>
+       <span><b>${euro.format(total)}</b> tol</span>`
     : "";
 
-  els.resultsSection.hidden = reports.length === 0;
-  els.zipInvoiceBtn.disabled = !selectedInvoice();
+  const totals = coverage.totals;
+  const weekShares = coverage.weeksDetail || [];
+  const timeline = coverage.timeline || {};
+  if (totals?.rows || weekShares.length) {
+    const reportPct = Number(totals?.percent || 0);
+    const reportFrom = timeline.reportFrom || "";
+    const reportTo = timeline.reportTo || "";
+    const calendar = renderCalendar(timeline.days || []);
+    const weekList = weekShares.map((item) => (
+      `<span class="coverage-chip"><b>${escapeHtml(item.id)}</b> ${formatIso(item.from)}–${formatIso(item.to)} · ${Number(item.percent || 0)}%</span>`
+    )).join("");
+    els.weekCheck.hidden = false;
+    els.weekCheck.innerHTML = `<div class="coverage-card">
+      <div class="coverage-block">
+        <div class="coverage-head">
+          <strong>Kalender</strong>
+          <span class="coverage-legend">Tolrapport <b>${formatIso(reportFrom)}</b> t/m <b>${formatIso(reportTo)}</b></span>
+        </div>
+        ${calendar}
+        ${weekList ? `<div class="cal-legend">${weekList}</div>` : ""}
+      </div>
+      <div class="coverage-block">
+        <div class="coverage-head">
+          <strong>Gekoppeld aan het rittenboek</strong>
+          <span class="coverage-legend"><b>${reportPct}%</b> van het tolrapport</span>
+        </div>
+        <div class="coverage-track" role="img" aria-label="${reportPct} procent van het tolrapport valt in het rittenboek">
+          <span class="coverage-filled" style="width:${reportPct}%"></span>
+        </div>
+      </div>
+    </div>`;
+  } else {
+    els.weekCheck.hidden = true;
+    els.weekCheck.innerHTML = "";
+  }
+
+  els.invoiceCheck.hidden = true;
+
+  els.resultsSection.hidden = weeks.length === 0 && reports.length === 0;
+  els.zipInvoiceBtn.disabled = !selectedWeek();
 
   if (!visible.length) {
     els.companyRows.innerHTML = companies.length
-      ? `<tr><td colspan="5" class="empty-row">Geen bedrijf/land gevonden.</td></tr>`
+      ? `<tr><td colspan="4" class="empty-row">Geen bedrijf gevonden.</td></tr>`
       : "";
     return;
   }
 
-  els.companyRows.innerHTML = visible.map((item) => {
-    const warningClass = item.customer === "Nog te verdelen" ? "company-warning" : "";
-    const missingCount = item.missingTripNumbers
-      ? `<span class="missing">${item.missingTripNumbers}</span>`
-      : "0";
-    return `<tr class="${warningClass}">
+  els.companyRows.innerHTML = visible.map((item) => `<tr>
       <td><strong>${escapeHtml(item.customer)}</strong></td>
-      <td>${escapeHtml(item.country || "")}</td>
+      <td>${escapeHtml(item.country || "—")}</td>
       <td class="number">${euro.format(item.eur)}</td>
-      <td class="number">${missingCount}</td>
       <td class="download-cell">
         <button type="button" class="button button-small"
-          data-customer="${escapeAttr(item.customer)}"
-          data-country="${escapeAttr(item.country || "")}">PDF downloaden</button>
+          data-customer="${escapeAttr(item.customer)}">PDF downloaden</button>
       </td>
-    </tr>`;
-  }).join("");
+    </tr>`).join("");
 }
 
 async function uploadFiles(fileList, expectedKind) {
   let files = [...fileList];
-  if (expectedKind === "report") files = files.filter((file) => /\.(csv|xls|xlsx)$/i.test(file.name)).slice(0, 1);
+  if (expectedKind === "report") files = files.filter((file) => /\.(csv|xls|xlsx)$/i.test(file.name));
   if (expectedKind === "planning") files = files.filter((file) => /\.(xls|xlsx)$/i.test(file.name));
   if (expectedKind === "invoice") files = files.filter((file) => /\.pdf$/i.test(file.name)).slice(0, 1);
   if (!files.length) {
     const messages = {
-      report: "Kies één tolrapport als CSV, XLS of XLSX.",
+      report: "Kies één of meer tolrapporten als CSV, XLS of XLSX.",
       planning: "Kies één of meer weekplanningen als XLS of XLSX.",
       invoice: "Kies één MSTS-factuur als PDF.",
     };
@@ -445,7 +486,6 @@ async function uploadFiles(fileList, expectedKind) {
   els.reportInput.disabled = true;
   els.planningInput.disabled = true;
   els.invoiceInput.disabled = true;
-  let uploadedReport = "";
   let completed = false;
   try {
     for (let index = 0; index < files.length; index += 1) {
@@ -459,17 +499,16 @@ async function uploadFiles(fileList, expectedKind) {
       const response = await fetch("/api/upload?expected=" + encodeURIComponent(expectedKind), { method: "POST", body });
       const data = await readJson(response);
       if (!response.ok) throw new Error(data.error || `${file.name} kon niet worden geüpload.`);
-      if (data.kind === "report") uploadedReport = data.name;
       updateLoading(10 + ((index + 1) / files.length) * 55, `${file.name} ingelezen`);
     }
     const success = expectedKind === "report"
-      ? "Tolrapport verwerkt."
+      ? `${files.length} tolrapport${files.length === 1 ? "" : "en"} verwerkt.`
       : expectedKind === "invoice"
         ? "Factuur-PDF verwerkt."
         : `${files.length} weekplanning${files.length === 1 ? "" : "en"} verwerkt.`;
     setStatus(success, "success");
     updateLoading(75, "Bedrijven en bedragen koppelen…");
-    await loadSources(uploadedReport);
+    await loadSources();
     updateLoading(95, "Overzichten voorbereiden…");
     completed = true;
   } catch (error) {
@@ -492,9 +531,10 @@ async function clearSession() {
     const response = await fetch("/api/clear", { method: "POST" });
     if (!response.ok) throw new Error("Wissen is mislukt.");
     companies = [];
-    invoices = [];
+    weeks = [];
     reports = [];
-    activeReport = "";
+    weekMeta = {};
+    coverage = { reports: [], totals: null };
     setStatus("Alle tijdelijke gegevens zijn gewist.", "success");
     await loadSources();
   } catch (error) {
@@ -541,19 +581,18 @@ async function downloadFile(url, button, fallbackName, withLoading = false) {
   }
 }
 
-function downloadCompany(customer, country, button) {
-  const url = "/api/customer-pdf?file=" + encodeURIComponent(selectedReport())
-    + "&invoice=" + encodeURIComponent(selectedInvoice())
-    + "&customer=" + encodeURIComponent(customer)
-    + "&country=" + encodeURIComponent(country || "");
-  const name = `Toloverzicht - ${customer} - ${country || "Onbekend land"}.pdf`;
+function downloadCompany(customer, button) {
+  const week = selectedWeek();
+  const url = "/api/customer-pdf?week=" + encodeURIComponent(week)
+    + "&customer=" + encodeURIComponent(customer);
+  const name = `Toloverzicht - ${week} - ${customer}.pdf`;
   return downloadFile(url, button, name);
 }
 
 function downloadZip(button) {
-  const url = "/api/customer-pdfs.zip?file=" + encodeURIComponent(selectedReport())
-    + "&invoice=" + encodeURIComponent(selectedInvoice());
-  const name = `Toloverzichten_${selectedInvoice()}.zip`;
+  const week = selectedWeek();
+  const url = "/api/customer-pdfs.zip?week=" + encodeURIComponent(week);
+  const name = `Toloverzichten_${week}.zip`;
   return downloadFile(url, button, name, true);
 }
 
@@ -591,12 +630,12 @@ function enableDropZone(zone, kind) {
 enableDropZone(els.reportDropZone, "report");
 enableDropZone(els.planningDropZone, "planning");
 enableDropZone(els.invoiceDropZone, "invoice");
-els.invoiceSelect.addEventListener("change", loadCompanies);
+els.weekSelect.addEventListener("change", loadCompanies);
 els.searchInput.addEventListener("input", renderCompanies);
 els.zipInvoiceBtn.addEventListener("click", () => downloadZip(els.zipInvoiceBtn));
 els.companyRows.addEventListener("click", (event) => {
   const button = event.target.closest("[data-customer]");
-  if (button) downloadCompany(button.dataset.customer, button.dataset.country || "", button);
+  if (button) downloadCompany(button.dataset.customer, button);
 });
 
 bootstrapAuthentication().catch((error) => {
