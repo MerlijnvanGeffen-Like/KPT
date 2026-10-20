@@ -350,13 +350,6 @@ def create_app() -> Flask:
             if Path(name).suffix.lower() not in core.ALLOWED_UPLOAD:
                 return json_error("Alleen .csv, .xls, .xlsx of .pdf", 400)
             files = uploaded_files()
-            current_size = sum(len(item["data"]) for item in files.values())
-            previous_size = len(files.get(name, {}).get("data", b""))
-            if current_size - previous_size + len(data) > storage.MAX_SESSION_BYTES:
-                return json_error("De tijdelijke sessie mag maximaal 100 MB bevatten.", 413)
-            # Vercel request-limiet ~4,5 MB: gecomprimeerde upload mag binnenkomen, daarna uitpakken.
-            if len(data) > 25 * 1024 * 1024:
-                return json_error("Dit bestand is groter dan 25 MB en kan niet worden verwerkt.", 413)
             path = Path(name)
             kind = core.detect_kind(path, data)
             expected = request.args.get("expected") or ""
@@ -364,7 +357,20 @@ def create_app() -> Flask:
                 labels = {"report": "tolrapport", "planning": "weekplanning", "invoice": "factuur-PDF"}
                 return json_error(f"{name} is geen geldig {labels[expected]}.", 400)
             if kind == "unknown":
-                return json_error(f"{name} wordt niet herkend als tolrapport, weekplanning of factuur-PDF.", 400)
+                return json_error(f"{name} wordt niet herkend als tolrapport of weekplanning.", 400)
+            # Alleen de bestanden van deze upload: geen oude CSV's of extra rapporten meenemen.
+            if (request.args.get("replace") or "") == "1" and expected in {"report", "planning"}:
+                files = {
+                    key: item
+                    for key, item in files.items()
+                    if item.get("kind") not in {expected, "invoice"}
+                }
+            current_size = sum(len(item["data"]) for item in files.values())
+            previous_size = len(files.get(name, {}).get("data", b""))
+            if current_size - previous_size + len(data) > storage.MAX_SESSION_BYTES:
+                return json_error("De tijdelijke sessie mag maximaal 100 MB bevatten.", 413)
+            if len(data) > 25 * 1024 * 1024:
+                return json_error("Dit bestand is groter dan 25 MB en kan niet worden verwerkt.", 413)
             files[name] = {"data": data, "mtime": time.time(), "kind": kind}
             g.session["files"] = files
             return jsonify({"ok": True, "name": name, "kind": kind})

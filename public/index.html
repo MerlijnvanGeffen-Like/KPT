@@ -40,44 +40,23 @@
     </header>
 
     <main class="page">
-      <section class="intro">
-        <h1>PDF-overzichten maken</h1>
-        <p>Het rittenboek (weekplanning) is leidend. Vul daarna één of meer wekelijkse tolrapporten aan tot de week compleet is.</p>
-      </section>
-
       <section class="upload-section">
         <div class="upload-grid">
           <div id="planningDropZone" class="upload-box">
-            <span class="upload-number">1</span>
-            <h2>Rittenboek</h2>
-            <p>De <code>Week xx-2026.xls</code>-bestanden. Die bepalen week, klant en ritnummer.</p>
+            <h2>1. Rittenboek</h2>
+            <p>Weekbestanden uit de planning.</p>
             <label class="button button-primary">
-              Weekplanningen kiezen
+              Kiezen
               <input id="planningInput" type="file" accept=".xls,.xlsx" multiple hidden />
             </label>
-            <small>je kunt meerdere weken tegelijk kiezen</small>
           </div>
 
           <div id="reportDropZone" class="upload-box">
-            <span class="upload-number">2</span>
-            <h2>Wekelijkse rapporten</h2>
-            <p>MSTS/Telepass-CSV’s. Meerdere rapporten vullen samen één week.</p>
+            <h2>2. Tolrapport</h2>
+            <p>Wekelijkse CSV van Telepass.</p>
             <label class="button">
-              Tolrapporten kiezen
+              Kiezen
               <input id="reportInput" type="file" accept=".csv,.xls,.xlsx" multiple hidden />
-            </label>
-            <small>je kunt meerdere rapporten tegelijk kiezen</small>
-          </div>
-
-          <div id="invoiceDropZone" class="upload-box upload-box-optional">
-            <span class="upload-number">3</span>
-            <div class="optional-copy">
-              <h2>MSTS-factuur <em>optioneel</em></h2>
-              <p>Upload de originele PDF om factuurdatum en bedragen te controleren.</p>
-            </div>
-            <label class="button">
-              Factuur-PDF kiezen
-              <input id="invoiceInput" type="file" accept=".pdf" hidden />
             </label>
           </div>
         </div>
@@ -88,20 +67,14 @@
           <div>
             <strong id="planningFiles">Nog geen rittenboek</strong>
             <span id="reportName">Geen tolrapporten</span>
-            <span id="invoiceFile">Geen factuur-PDF</span>
           </div>
           <button id="clearSessionBtn" class="text-button" type="button">Wissen</button>
         </div>
-
-        <p class="privacy">Bestanden blijven alleen tijdelijk in het werkgeheugen en worden niet opgeslagen.</p>
       </section>
 
       <section id="resultsSection" class="results" hidden>
         <div class="results-head">
-          <div>
-            <h2>Bedrijven</h2>
-            <p>Kies een week. Per klant een PDF op basis van het rittenboek.</p>
-          </div>
+          <h2>Klanten</h2>
           <label>
             Week
             <select id="weekSelect"></select>
@@ -109,13 +82,12 @@
         </div>
 
         <div class="toolbar">
-          <button id="zipInvoiceBtn" class="button button-primary" type="button">Deze week als ZIP</button>
-          <input id="searchInput" type="search" placeholder="Zoek bedrijf of land…" />
+          <button id="zipInvoiceBtn" class="button button-primary" type="button">Alle PDF’s</button>
+          <input id="searchInput" type="search" placeholder="Zoek klant…" />
         </div>
 
         <div id="summary" class="summary"></div>
         <div id="weekCheck" class="week-check" hidden></div>
-        <div id="invoiceCheck" class="invoice-check" hidden></div>
 
         <div class="table-wrap">
           <table>
@@ -137,13 +109,9 @@
   <div id="userModal" class="modal-backdrop" hidden>
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="usersTitle">
       <div class="modal-head">
-        <div>
-          <h2 id="usersTitle">Gebruikers</h2>
-          <p>Alleen gebruikersnaam, rol en wachtwoordhash worden opgeslagen.</p>
-        </div>
+        <h2 id="usersTitle">Gebruikers</h2>
         <button id="closeUsersButton" class="close-button" type="button" aria-label="Sluiten">×</button>
       </div>
-
       <form id="addUserForm" class="user-form">
         <label>
           Gebruikersnaam
@@ -157,7 +125,7 @@
           <input id="newAdmin" type="checkbox" />
           Beheerder
         </label>
-        <button class="button button-primary" type="submit">Gebruiker toevoegen</button>
+        <button class="button button-primary" type="submit">Toevoegen</button>
       </form>
       <div id="userError" class="message error" hidden></div>
       <div id="userList" class="user-list"></div>
@@ -166,13 +134,10 @@
 
   <div id="loadingScreen" class="loading-screen" role="status" aria-live="polite" hidden>
     <div class="loading-card">
-      <img src="https://kuijperstransport.nl/Images/Logo.png" alt="Kuijpers Transport" />
-      <h2 id="loadingTitle">Bestanden verwerken</h2>
       <p id="loadingText">Even geduld…</p>
       <div class="progress-track" aria-hidden="true">
         <div id="loadingBar" class="progress-bar"></div>
       </div>
-      <span id="loadingPercent">0%</span>
     </div>
   </div>
 

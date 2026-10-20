@@ -20,8 +20,24 @@ PASSWORD_MIN_LENGTH = 4
 
 CUSTOMER_ALIASES = {
     "powercast": "PowerCast",
-    "huism": "Huism.",
-    "huism.": "Huism.",
+    "huism": "Huisman",
+    "huism.": "Huisman",
+    "huisman": "Huisman",
+    "verhoe": "Verhoeven",
+    "verhoeven": "Verhoeven",
+    "grooth": "Groothuis",
+    "groothuis": "Groothuis",
+    "werff": "Van der Werff",
+    "vdwerff": "Van der Werff",
+    "v.d.werff": "Van der Werff",
+    "van der werff": "Van der Werff",
+    "jverp": "J. van Erp",
+    "j. van erp": "J. van Erp",
+    "j van erp": "J. van Erp",
+    "van erp": "J. van Erp",
+    "loos": "Loos Kuijvegh",
+    "loos kuijvegh": "Loos Kuijvegh",
+    "loos-kuijvegh": "Loos Kuijvegh",
 }
 
 
@@ -83,7 +99,8 @@ def canon_customer(name: str) -> str:
     raw = " ".join((name or "").split())
     if not raw:
         return ""
-    return CUSTOMER_ALIASES.get(raw.lower(), raw)
+    compact = re.sub(r"[.\s]+", "", raw).lower()
+    return CUSTOMER_ALIASES.get(raw.lower()) or CUSTOMER_ALIASES.get(compact) or raw
 
 
 def safe_filename(name: str) -> str:
@@ -191,20 +208,42 @@ def report_row_from_map(row: dict) -> dict | None:
     plate = normalize_plate(plate_raw)
     if not plate:
         return None
+    country = pick(row, "Trx Country", "Land")
+    km = round(money(pick(row, "Distance KM", "KM")), 3)
+    eur = round(money(pick(row, "Total Amt (EUR)", "Trx Amt (EUR)", "Tol EUR", "Tol")), 2)
     return {
         "id": pick(row, "Trx ID", "ID"),
         "date": pick(row, "Trx Date", "Datum"),
         "time": pick(row, "Trx Time", "Tijd"),
         "plate": plate,
         "plateRaw": plate_raw,
-        "km": round(money(pick(row, "Distance KM", "KM")), 3),
-        "eur": round(money(pick(row, "Total Amt (EUR)", "Trx Amt (EUR)", "Tol EUR", "Tol")), 2),
+        "km": _correct_french_km(km, eur, country),
+        "eur": eur,
         "road": pick(row, "Road Name", "Weg"),
-        "country": pick(row, "Trx Country", "Land"),
+        "entry": pick(row, "Entry Terminal"),
+        "exit": pick(row, "Exit Terminal"),
+        "tsp": pick(row, "TISPL TSP"),
+        "country": country,
         "invId": pick(row, "Inv ID"),
         "invDate": pick(row, "Inv Date"),
         "spec": pick(row, "Spec Page"),
+        "billing": pick(row, "Billing Status"),
     }
+
+
+def _correct_french_km(km: float, eur: float, country: str) -> float:
+    """Telepass zet Franse TISPL-km een decimaal te weinig (12,45 i.p.v. 124,5)."""
+    if km <= 0 or eur <= 0:
+        return km
+    code = re.sub(r"[^A-Z]", "", (country or "").upper())
+    if code not in {"FR", "FRA", "FRANKRIJK", "FRANCE"}:
+        return km
+    if eur / km <= 1.2:
+        return km
+    fixed = round(km * 10, 3)
+    if eur / fixed > 2.5:
+        return km
+    return fixed
 
 
 def parse_csv_report(path: Path, data: bytes | None = None) -> list[dict]:
@@ -268,7 +307,7 @@ def parse_report(name: str, invoice: str | None, uploaded: dict) -> list[dict]:
 
 
 def list_invoices(name: str, uploaded: dict) -> list[dict]:
-    rows = parse_report(name, None, uploaded)
+    rows = dedupe_report_rows(parse_report(name, None, uploaded))
     buckets: dict[str, list] = {}
     for row in rows:
         buckets.setdefault(row.get("invId") or "ongefactureerd", []).append(row)
@@ -439,7 +478,7 @@ def parse_week_sheet(name: str, sheet_rows: list[list[str]], trips: list, week: 
         customer = canon_customer(customer)
         if not plate or not customer or not date_val:
             continue
-        if customer.lower() == "loos" and not trip_number:
+        if customer.lower().startswith("loos") and not trip_number:
             trip_number = vehicle
         trips.append(
             {
@@ -449,7 +488,7 @@ def parse_week_sheet(name: str, sheet_rows: list[list[str]], trips: list, week: 
                 "plateRaw": plate_raw,
                 "customer": customer,
                 "km": km,
-                "tripNumber": trip_number,
+                "tripNumber": trip_number or desc,
                 "desc": desc,
             }
         )
@@ -521,21 +560,176 @@ def parse_week_files(uploaded: dict) -> dict:
     return {"files": files, "rows": rows}
 
 
-def parse_all_reports(uploaded: dict) -> tuple[list[dict], list[str]]:
-    """Voeg alle wekelijkse tolrapporten samen; dubbele transacties (zelfde ID) één keer."""
-    names = [item["name"] for item in list_report_files(uploaded)]
-    rows: list[dict] = []
-    seen: set[str] = set()
-    for name in names:
-        for row in parse_report(name, None, uploaded):
-            key = row.get("id") or "|".join(
-                [row.get("date") or "", row.get("time") or "", row.get("plate") or "", str(row.get("eur") or 0), str(row.get("km") or 0)]
-            )
-            if key in seen:
+def _trx_id_key(row: dict) -> str:
+    return (row.get("id") or "").strip()
+
+
+def _trx_fingerprint(row: dict) -> str:
+    return "|".join(
+        [
+            row.get("date") or "",
+            row.get("time") or "",
+            row.get("plate") or "",
+            f"{float(row.get('eur') or 0):.2f}",
+            f"{float(row.get('km') or 0):.3f}",
+        ]
+    )
+
+
+def _is_billed(row: dict) -> bool:
+    return (row.get("billing") or "").strip().lower() == "billed"
+
+
+def _is_dont_bill(row: dict) -> bool:
+    return (row.get("billing") or "").strip().lower().replace("'", "") == "dont bill"
+
+
+def _approx_num(left: float, right: float, tol: float) -> bool:
+    return abs(left - right) <= tol
+
+
+def _is_gantry_row(row: dict) -> bool:
+    text = f"{row.get('road') or ''} {row.get('entry') or ''}"
+    return bool(re.search(r"\b[AB]\s?\d{1,3}\b", text, re.I))
+
+
+def _report_country_code(row: dict) -> str:
+    raw = re.sub(r"[^A-Z]", "", (row.get("country") or "").upper())
+    if raw in {"DE", "DEU", "GERMANY", "DEUTSCHLAND"} or raw.startswith("DEU"):
+        return "DE"
+    if len(raw) >= 2:
+        return raw[:2]
+    return raw
+
+
+def _is_germany(row: dict) -> bool:
+    return _report_country_code(row) == "DE"
+
+
+_FOREIGN_TOLL = (
+    "SANEF",
+    "APRR",
+    "COFIROUTE",
+    "ALIS",
+    "ASF",
+    "AREA",
+    "ESCOTA",
+    "IBERPISTAS",
+    "ALFAJARIN",
+    "ASFINAG",
+    "BRISA",
+    "CONCESSAO",
+    "AUTOSTRADE",
+    "DARS",
+    "VINCI",
+    "MONTAUBAN",
+    "CHESNES",
+    "RIVES",
+    "VALONGO",
+    "INZERSDORF",
+)
+
+
+def _is_bundle_row(row: dict) -> bool:
+    entry = (row.get("entry") or "").strip()
+    km = float(row.get("km") or 0)
+    if entry and re.fullmatch(r"[\d\s-]+", entry) and km >= 8:
+        return True
+    blob = f"{entry} {row.get('exit') or ''} {row.get('road') or ''} {row.get('tsp') or ''}".upper()
+    if any(tag in blob for tag in _FOREIGN_TOLL):
+        return True
+    return (not _is_gantry_row(row)) and km >= 10
+
+
+def collapse_detail_summaries(rows: list[dict]) -> list[dict]:
+    """Duitse tol staat vaak als deeltrajecten én als somregel; tel de som niet dubbel."""
+    groups: dict[tuple[str, str, str], list[int]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        key = (row.get("date") or "", row.get("plate") or "", _report_country_code(row))
+        groups[key].append(index)
+    drop: set[int] = set()
+    for indexes in groups.values():
+        if not _is_germany(rows[indexes[0]]):
+            continue
+        gantry = [i for i in indexes if _is_gantry_row(rows[i])]
+        if len(gantry) < 5:
+            continue
+        for i in indexes:
+            if i in gantry:
                 continue
-            seen.add(key)
-            rows.append(row)
-    return rows, names
+            if _is_bundle_row(rows[i]):
+                drop.add(i)
+    for indexes in groups.values():
+        if len(indexes) < 6:
+            continue
+        ordered = sorted(
+            indexes,
+            key=lambda i: (rows[i].get("time") or "", rows[i].get("id") or ""),
+        )
+        kms = {i: float(rows[i].get("km") or 0) for i in ordered}
+        eurs = {i: float(rows[i].get("eur") or 0) for i in ordered}
+        local_drop: set[int] = set()
+        for i in sorted(ordered, key=lambda idx: kms[idx], reverse=True):
+            if i in local_drop or i in drop:
+                continue
+            matched: list[int] = []
+            acc_km = 0.0
+            acc_eur = 0.0
+            for j in reversed(ordered):
+                if j == i or j in local_drop or j in drop:
+                    continue
+                if (rows[j].get("time") or "", rows[j].get("id") or "") >= (
+                    rows[i].get("time") or "",
+                    rows[i].get("id") or "",
+                ):
+                    continue
+                if kms[j] >= kms[i] - 1e-9:
+                    break
+                acc_km += kms[j]
+                acc_eur += eurs[j]
+                matched.append(j)
+                if acc_km > kms[i] + 0.08 and acc_eur > eurs[i] + 0.04:
+                    break
+                if (
+                    len(matched) >= 5
+                    and _approx_num(acc_km, kms[i], 0.08)
+                    and _approx_num(acc_eur, eurs[i], 0.04)
+                ):
+                    local_drop.update(matched)
+                    break
+        drop.update(local_drop)
+    return [row for i, row in enumerate(rows) if i not in drop]
+
+
+def dedupe_report_rows(rows: list[dict]) -> list[dict]:
+    """Zelfde rit niet twee keer: Don't Bill + Billed, of dezelfde Trx ID."""
+    seen_ids: set[str] = set()
+    by_fp: dict[str, dict] = {}
+    for row in rows:
+        trx_id = _trx_id_key(row)
+        if trx_id:
+            if trx_id in seen_ids:
+                continue
+            seen_ids.add(trx_id)
+        fp = _trx_fingerprint(row)
+        existing = by_fp.get(fp)
+        if existing is None:
+            by_fp[fp] = row
+        elif _is_dont_bill(existing) and not _is_dont_bill(row):
+            by_fp[fp] = row
+    return collapse_detail_summaries(list(by_fp.values()))
+
+
+def parse_all_reports(uploaded: dict) -> tuple[list[dict], list[str]]:
+    """Alleen de geüploade tolrapporten in de sessie, geen extra bestanden van schijf."""
+    reports = list_report_files(uploaded)
+    if len(reports) > 1:
+        reports = [max(reports, key=lambda item: (item.get("mtime") or 0, item["name"]))]
+    names = [item["name"] for item in reports]
+    rows: list[dict] = []
+    for name in names:
+        rows.extend(parse_report(name, None, uploaded))
+    return dedupe_report_rows(rows), names
 
 
 def list_weeks(uploaded: dict) -> list[dict]:
@@ -649,6 +843,111 @@ def normalize_country(value: str) -> str:
     return aliases.get(key, raw)
 
 
+def _split_amount(total: float, weights: list[float]) -> list[float]:
+    """Verdeel total over weights; laatste regel vangt afronding."""
+    if not weights:
+        return []
+    mass = sum(weights)
+    if mass <= 0:
+        share = round(total / len(weights), 1)
+        parts = [share] * (len(weights) - 1)
+        parts.append(round(total - share * (len(weights) - 1), 1))
+        return parts
+    parts = []
+    assigned = 0.0
+    for i, weight in enumerate(weights):
+        if i == len(weights) - 1:
+            parts.append(round(total - assigned, 1))
+        else:
+            share = round(total * weight / mass, 1)
+            parts.append(share)
+            assigned += share
+    return parts
+
+
+def _allocate_plan_km_by_country(rows: list[dict]) -> None:
+    """Rittenboek heeft alleen totaal-km. Zet KM rit op het land, niet de hele rit.
+
+    Betrouwbare landen (niet Frankrijk) krijgen hun KM tol als km in dat land.
+    Frankrijk krijgt de rest van het rittenboek, zodat een Franse regel niet 760 km
+    toont terwijl dat NL+BE+FR samen is.
+    """
+    trips: dict[tuple, list[dict]] = defaultdict(list)
+    for row in rows:
+        trips[(row.get("date"), row.get("plate"), row.get("customer"))].append(row)
+
+    for group in trips.values():
+        plan = float(group[0].get("planKm") or 0)
+        if plan <= 0:
+            for row in group:
+                row["planKm"] = 0.0
+            continue
+        if len(group) == 1:
+            continue
+
+        unreliable = [row for row in group if (row.get("country") or "") == "Frankrijk"]
+        reliable = [row for row in group if (row.get("country") or "") != "Frankrijk"]
+        reliable_km = sum(float(row.get("km") or 0) for row in reliable)
+
+        if unreliable and plan > reliable_km:
+            leftover = round(plan - reliable_km, 1)
+            for row in reliable:
+                row["planKm"] = round(float(row.get("km") or 0), 1)
+            shares = _split_amount(leftover, [float(row.get("km") or 0) for row in unreliable])
+            for row, share in zip(unreliable, shares):
+                row["planKm"] = share
+        else:
+            shares = _split_amount(plan, [float(row.get("km") or 0) for row in group])
+            for row, share in zip(group, shares):
+                row["planKm"] = share
+
+
+def _french_toll_km_incomplete(plan_km: float, toll_km: float) -> bool:
+    """Tolrapport mist Franse km als het duidelijk onder de rit uit het rittenboek blijft."""
+    if plan_km < 80:
+        return False
+    return toll_km <= 0 or toll_km < 0.55 * plan_km
+
+
+def _fill_incomplete_french_km(rows: list[dict]) -> None:
+    """Frankrijk: onvolledige KM tol aanvullen uit het rittenboek. Bedrag blijft uit het rapport."""
+    for row in rows:
+        if (row.get("country") or "") != "Frankrijk":
+            continue
+        plan = float(row.get("planKm") or 0)
+        km = float(row.get("km") or 0)
+        if not _french_toll_km_incomplete(plan, km):
+            continue
+        row["kmReport"] = km
+        row["km"] = plan
+        row["kmFromPlan"] = True
+
+
+def _resolve_plan(
+    iso_date: str,
+    plate: str,
+    plan_map: dict,
+    plan_by_plate: dict[str, list[dict]],
+    week_from: str,
+    week_to: str,
+) -> tuple[dict | None, bool]:
+    """Eerst exacte dag+kenteken, anders dezelfde auto elders in deze week (lege km / extra dag)."""
+    exact = plan_map.get((iso_date, plate))
+    if exact:
+        return exact, True
+    if not iso_date or not (week_from <= iso_date <= week_to):
+        return None, False
+    candidates = plan_by_plate.get(plate) or []
+    if not candidates:
+        return None, False
+    target = datetime.strptime(iso_date, "%Y-%m-%d").date()
+    closest = min(
+        candidates,
+        key=lambda row: abs((datetime.strptime(row["date"], "%Y-%m-%d").date() - target).days),
+    )
+    return closest, False
+
+
 def build_customer_pdf_rows(
     week_id: str, uploaded: dict
 ) -> tuple[dict, dict[str, list[dict]]]:
@@ -661,6 +960,9 @@ def build_customer_pdf_rows(
         raise ValueError("Week niet gevonden in het rittenboek")
 
     plan_map = {(row["date"], row["plate"]): row for row in plan_rows}
+    plan_by_plate: dict[str, list[dict]] = defaultdict(list)
+    for row in plan_rows:
+        plan_by_plate[row["plate"]].append(row)
     week_from = min(row["date"] for row in plan_rows)
     week_to = max(row["date"] for row in plan_rows)
     transactions, report_names = parse_all_reports(uploaded)
@@ -673,7 +975,7 @@ def build_customer_pdf_rows(
     for transaction in transactions:
         iso_date = dmy_iso(transaction.get("date") or "")
         plate = transaction["plate"]
-        plan = plan_map.get((iso_date, plate))
+        plan, exact = _resolve_plan(iso_date, plate, plan_map, plan_by_plate, week_from, week_to)
         if not plan:
             if iso_date and week_from <= iso_date <= week_to:
                 unmatched_rows += 1
@@ -690,7 +992,10 @@ def build_customer_pdf_rows(
                 "plate": plan.get("plateRaw") or transaction.get("plateRaw") or plate,
                 "ritten": 0,
                 "km": 0.0,
+                "planKm": round(float(plan.get("km") or 0), 1) if exact else 0.0,
                 "eur": 0.0,
+                "billedEur": 0.0,
+                "openEur": 0.0,
                 "customer": customer,
                 "country": country,
                 "ritnr": plan.get("tripNumber") or "",
@@ -699,15 +1004,27 @@ def build_customer_pdf_rows(
         item["ritten"] += 1
         item["km"] += transaction["km"]
         item["eur"] += transaction["eur"]
+        if _is_billed(transaction):
+            item["billedEur"] += transaction["eur"]
+        elif _is_dont_bill(transaction):
+            item["openEur"] += transaction["eur"]
         if "-" in (transaction.get("plateRaw") or ""):
             item["plate"] = transaction["plateRaw"]
 
-    by_customer: dict[str, list[dict]] = defaultdict(list)
+    billed_items = []
     for item in grouped.values():
         item["km"] = round(item["km"], 1)
         item["eur"] = round(item["eur"], 2)
+        item["billedEur"] = round(item["billedEur"], 2)
+        item["openEur"] = round(item["openEur"], 2)
         if item["eur"] <= 0:
             continue
+        billed_items.append(item)
+    _allocate_plan_km_by_country(billed_items)
+    _fill_incomplete_french_km(billed_items)
+
+    by_customer: dict[str, list[dict]] = defaultdict(list)
+    for item in billed_items:
         by_customer[item["customer"]].append(item)
     for rows in by_customer.values():
         rows.sort(key=lambda row: ((row["date"] or date.min), row.get("country") or "", row["plate"]))
@@ -720,8 +1037,41 @@ def build_customer_pdf_rows(
         "planningTrips": len(plan_rows),
         "unmatchedTollRows": unmatched_rows,
         "unmatchedTollEur": round(unmatched_eur, 2),
+        "qualityNotes": _quality_notes(unmatched_rows, unmatched_eur, dict(by_customer)),
     }
     return meta, dict(by_customer)
+
+
+def _quality_notes(unmatched_rows: int, unmatched_eur: float, by_customer: dict) -> list[dict]:
+    """Controles voor de operator bij elke nieuwe week; niet op de klant-PDF."""
+    notes = []
+    if unmatched_eur > 1:
+        notes.append(
+            {
+                "level": "warning",
+                "text": (
+                    f"{unmatched_rows} tolregels in deze week zitten niet in het rittenboek "
+                    f"(€ {unmatched_eur:,.2f}). Die komen niet op een klant-PDF."
+                ),
+            }
+        )
+    filled_fr = sum(
+        1
+        for rows in by_customer.values()
+        for row in rows
+        if row.get("kmFromPlan")
+    )
+    if filled_fr:
+        notes.append(
+            {
+                "level": "info",
+                "text": (
+                    f"{filled_fr} Franse rit(ten): kilometers aangevuld uit het rittenboek "
+                    "(het tolrapport had die km niet volledig). Het bedrag blijft uit het rapport."
+                ),
+            }
+        )
+    return notes
 
 
 def _week_share_of_report(
@@ -859,7 +1209,7 @@ def check_reports_against_planning(uploaded: dict) -> dict:
         dated = []
         covered = 0
         matched = 0
-        for row in parse_report(name, None, uploaded):
+        for row in dedupe_report_rows(parse_report(name, None, uploaded)):
             iso = dmy_iso(row.get("date") or "")
             if not iso:
                 continue
@@ -977,6 +1327,20 @@ def check_reports_for_week(week_id: str, uploaded: dict, plan_rows: list[dict] |
     return check_reports_against_planning(uploaded).get("reports") or []
 
 
+def _rows_for_customer(by_customer: dict[str, list[dict]], name: str) -> list[dict] | None:
+    wanted = canon_customer(name)
+    if wanted in by_customer:
+        return by_customer[wanted]
+    low = wanted.lower()
+    compact = re.sub(r"[.\s]+", "", wanted).lower()
+    for key, rows in by_customer.items():
+        if key.lower() == low or re.sub(r"[.\s]+", "", key).lower() == compact:
+            return rows
+        if canon_customer(key).lower() == low:
+            return rows
+    return None
+
+
 def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
     meta, by_customer = build_customer_pdf_rows(week_id, uploaded)
     merged: dict[str, dict] = {}
@@ -984,6 +1348,7 @@ def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
         eur = round(sum(row["eur"] for row in rows), 2)
         if eur <= 0:
             continue
+        customer = canon_customer(customer)
         key = customer.lower()
         item = merged.setdefault(
             key,
@@ -996,6 +1361,8 @@ def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
                 "eur": 0.0,
             },
         )
+        if len(customer) > len(item["customer"]):
+            item["customer"] = customer
         item["countries"].update(row["country"] for row in rows if row.get("country"))
         item["rows"] += len(rows)
         item["trips"] += sum(row["ritten"] for row in rows)
@@ -1026,7 +1393,7 @@ def build_customer_pdf(week_id: str, customer: str, country: str, uploaded: dict
     import maak_pdf_per_klant as pdf
 
     meta, by_customer = build_customer_pdf_rows(week_id, uploaded)
-    rows = by_customer.get(customer)
+    rows = _rows_for_customer(by_customer, customer)
     if not rows:
         raise ValueError("Klant niet gevonden in deze week van het rittenboek")
     if country:

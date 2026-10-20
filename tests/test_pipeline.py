@@ -1,0 +1,147 @@
+"""Regressies: dezelfde fouten mogen bij een nieuwe week niet terugkomen."""
+from __future__ import annotations
+
+import unittest
+from datetime import date
+from io import BytesIO
+
+from pypdf import PdfReader
+
+from kpt.core import (
+    _allocate_plan_km_by_country,
+    _correct_french_km,
+    _fill_incomplete_french_km,
+    _resolve_plan,
+    collapse_detail_summaries,
+    dedupe_report_rows,
+)
+from maak_pdf_per_klant import make_pdf_bytes
+
+
+def trx(**kwargs):
+    row = {
+        "id": "",
+        "date": "21/09/2026",
+        "time": "10:00:00",
+        "plate": "95BPS8",
+        "plateRaw": "95-BPS-8",
+        "km": 1.0,
+        "eur": 1.0,
+        "road": "",
+        "entry": "",
+        "exit": "",
+        "tsp": "",
+        "country": "DE",
+        "billing": "Billed",
+    }
+    row.update(kwargs)
+    return row
+
+
+class PipelineTests(unittest.TestCase):
+    def test_dedupe_prefers_billed_over_dont_bill(self):
+        rows = dedupe_report_rows(
+            [
+                trx(id="a1", billing="Don't Bill", eur=12.01, km=20),
+                trx(id="b2", billing="Billed", eur=12.01, km=20),
+            ]
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["billing"], "Billed")
+        self.assertEqual(rows[0]["eur"], 12.01)
+
+    def test_german_summary_and_foreign_bundle_dropped(self):
+        gantries = [
+            trx(id=str(i), time=f"10:0{i}:00", road=f"A {i}", entry=f"A {i}", km=10, eur=2)
+            for i in range(6)
+        ]
+        summary = trx(id="sum", time="10:09:00", entry="123456", km=60, eur=12)
+        foreign = trx(id="at", time="10:10:00", entry="ASFINAG", km=320, eur=80, country="DE")
+        kept = collapse_detail_summaries(gantries + [summary, foreign])
+        ids = {row["id"] for row in kept}
+        self.assertTrue({"0", "1", "2", "3", "4", "5"} <= ids)
+        self.assertNotIn("sum", ids)
+        self.assertNotIn("at", ids)
+        self.assertAlmostEqual(sum(row["eur"] for row in kept), 12.0)
+
+    def test_french_km_decimal_shift(self):
+        self.assertEqual(_correct_french_km(12.45, 18.83, "FR"), 124.5)
+        self.assertEqual(_correct_french_km(124.5, 18.83, "FR"), 124.5)
+
+    def test_plan_km_is_per_country_not_trip_total(self):
+        rows = [
+            {"date": date(2026, 9, 23), "plate": "X", "customer": "ETC", "country": "België", "km": 40.0, "planKm": 760.0},
+            {"date": date(2026, 9, 23), "plate": "X", "customer": "ETC", "country": "Frankrijk", "km": 343.2, "planKm": 760.0},
+            {"date": date(2026, 9, 23), "plate": "X", "customer": "ETC", "country": "Nederland", "km": 20.0, "planKm": 760.0},
+        ]
+        _allocate_plan_km_by_country(rows)
+        by_country = {row["country"]: row["planKm"] for row in rows}
+        self.assertEqual(by_country["België"], 40.0)
+        self.assertEqual(by_country["Nederland"], 20.0)
+        self.assertEqual(by_country["Frankrijk"], 700.0)
+        self.assertEqual(sum(by_country.values()), 760.0)
+
+    def test_same_plate_other_day_in_week_still_matches(self):
+        plan = {"date": "2026-09-21", "plate": "46BNT5", "customer": "Raben", "km": 181, "tripNumber": "677664"}
+        found, exact = _resolve_plan(
+            "2026-09-22",
+            "46BNT5",
+            {("2026-09-21", "46BNT5"): plan},
+            {"46BNT5": [plan]},
+            "2026-09-21",
+            "2026-09-26",
+        )
+        self.assertIs(found, plan)
+        self.assertFalse(exact)
+        missing, _ = _resolve_plan(
+            "2026-09-22",
+            "21BSZ2",
+            {("2026-09-21", "46BNT5"): plan},
+            {"46BNT5": [plan]},
+            "2026-09-21",
+            "2026-09-26",
+        )
+        self.assertIsNone(missing)
+
+    def test_incomplete_french_km_filled_from_rittenboek(self):
+        rows = [
+            {"country": "Frankrijk", "planKm": 700.0, "km": 343.2, "eur": 188.3},
+        ]
+        _fill_incomplete_french_km(rows)
+        self.assertTrue(rows[0]["kmFromPlan"])
+        self.assertEqual(rows[0]["km"], 700.0)
+        self.assertEqual(rows[0]["kmReport"], 343.2)
+        self.assertEqual(rows[0]["eur"], 188.3)
+
+    def test_customer_pdf_has_read_guide_not_internal_notes(self):
+        pdf = make_pdf_bytes(
+            "ETC",
+            [
+                {
+                    "date": date(2026, 9, 23),
+                    "plate": "00-ABC-1",
+                    "ritnr": "12",
+                    "country": "Frankrijk",
+                    "planKm": 700.0,
+                    "km": 700.0,
+                    "kmFromPlan": True,
+                    "eur": 188.3,
+                }
+            ],
+            {"id": "Week 39-2026", "from": "2026-09-21", "to": "2026-09-27", "date": ""},
+            "Wekelijks_rapport_geheim.csv",
+        )
+        text = "".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf)).pages)
+        self.assertIn("Leeswijzer", text)
+        self.assertIn("KM rit", text)
+        self.assertIn("planning", text.lower())
+        self.assertIn("rittenboek", text.lower())
+        self.assertNotIn("Don't Bill", text)
+        self.assertNotIn("Gefactureerd", text)
+        self.assertNotIn("Wekelijks_rapport_geheim.csv", text)
+        self.assertNotIn("TISPL", text)
+        self.assertNotIn("Telepass", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
