@@ -100,20 +100,43 @@ function dateInRanges(iso, ranges) {
   return Boolean(iso && ranges.some((range) => iso >= range.from && iso <= range.to));
 }
 
+function onVercelHost() {
+  return /\.vercel\.app$/i.test(location.hostname);
+}
+
 async function weekRangesFromServer() {
   const data = await getJson("/api/weeks").catch(() => ({ weeks: [] }));
-  return (data.weeks || [])
+  const list = (data.weeks || []).length ? data.weeks : weeks;
+  return (list || [])
     .filter((week) => week.from && week.to)
-    .map((week) => ({ from: week.from, to: week.to }));
+    .map((week) => ({ from: String(week.from).slice(0, 10), to: String(week.to).slice(0, 10) }));
 }
 
 function csvHeaderMeta(headerLine) {
-  const semi = headerLine.split(";");
-  const comma = headerLine.split(",");
-  const delim = semi.length >= comma.length ? ";" : ",";
-  const cols = delim === ";" ? semi : comma;
-  const idx = cols.findIndex((col) => /trx\s*date|^datum$/i.test(String(col).replace(/"/g, "").trim()));
+  const raw = String(headerLine || "").replace(/^\uFEFF/, "");
+  const candidates = [
+    { delim: ";", cols: raw.split(";") },
+    { delim: ",", cols: raw.split(",") },
+    { delim: "\t", cols: raw.split("\t") },
+  ].sort((left, right) => right.cols.length - left.cols.length);
+  const { delim, cols } = candidates[0];
+  const idx = cols.findIndex((col) => {
+    const name = String(col).replace(/["']/g, "").trim().toLowerCase();
+    return /trx\s*date/.test(name) || name === "datum" || name === "date" || name.includes("transaction date");
+  });
   return { delim, idx };
+}
+
+function rowDateIso(cols, dateIdx) {
+  if (dateIdx >= 0) {
+    const iso = csvDateToIso(cols[dateIdx] || "");
+    if (iso) return iso;
+  }
+  for (const cell of cols) {
+    const iso = csvDateToIso(cell);
+    if (iso) return iso;
+  }
+  return "";
 }
 
 async function slimCsvToPlanning(file, ranges, onProgress) {
@@ -139,13 +162,8 @@ async function slimCsvToPlanning(file, ranges, onProgress) {
       }
       if (!line.trim()) continue;
       total += 1;
-      if (meta.idx < 0) {
-        kept += 1;
-        lines.push(line);
-        continue;
-      }
       const cols = line.split(meta.delim);
-      const iso = csvDateToIso(cols[meta.idx] || "");
+      const iso = rowDateIso(cols, meta.idx);
       if (dateInRanges(iso, ranges)) {
         kept += 1;
         lines.push(line);
@@ -468,7 +486,10 @@ async function postUpload(file, expectedKind, replace) {
 }
 
 async function prepareReportFile(file, ranges, index, total) {
-  if (!/\.csv$/i.test(file.name) || !ranges.length) return file;
+  if (!/\.csv$/i.test(file.name)) return file;
+  if (!ranges.length) {
+    throw new Error("Upload eerst het rittenboek, daarna het CSV.");
+  }
   updateLoading(8 + (index / total) * 20, `${file.name} filteren op week…`);
   const slim = await slimCsvToPlanning(file, ranges, (seen) => {
     if (seen && seen % 20000 === 0) {
@@ -479,6 +500,11 @@ async function prepareReportFile(file, ranges, index, total) {
     `${slim.kept.toLocaleString("nl-NL")} van ${slim.total.toLocaleString("nl-NL")} tolregels vallen in het rittenboek.`,
     "success",
   );
+  if (onVercelHost() && slim.file.size > 10 * 1024 * 1024) {
+    throw new Error(
+      "Na het filteren is het bestand nog te groot voor de website. Controleer of het rittenboek de juiste week is.",
+    );
+  }
   return slim.file;
 }
 
@@ -498,9 +524,9 @@ async function uploadFiles(fileList, expectedKind) {
 
   if (expectedKind === "report") {
     const ranges = await weekRangesFromServer();
-    if (!ranges.length && files.some((file) => /\.csv$/i.test(file.name) && file.size > 1.5 * 1024 * 1024)) {
+    if (!ranges.length) {
       pendingReportFiles = files;
-      setStatus("Groot rapport staat klaar. Upload eerst het rittenboek; daarna sturen we alleen die week naar de server.", "success");
+      setStatus("CSV staat klaar. Upload eerst het rittenboek; daarna sturen we alleen die week.", "success");
       return;
     }
   }
