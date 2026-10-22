@@ -14,6 +14,8 @@ from typing import Any
 SESSION_TTL = int(os.environ.get("KPT_SESSION_TTL", str(2 * 60 * 60)))
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_SESSION_BYTES = 550 * 1024 * 1024
+# Op Vercel: geen hele Telepass-dumps in Redis; de browser stuurt alleen de week.
+MAX_VERCEL_FILE_BYTES = 12 * 1024 * 1024
 _B64 = "b64:"
 # Upstash free/REST: houd encoded chunks onder ~750 KB.
 _REST_CHUNK_CHARS = 700_000
@@ -164,6 +166,19 @@ class _UpstashStore:
     def expire(self, key: str, seconds: int) -> None:
         self._redis.expire(key, seconds)
 
+    def expire_bytes(self, key: str, seconds: int) -> None:
+        self._redis.expire(key, seconds)
+        marker = self._redis.get(f"{key}:chunks")
+        if marker is None:
+            return
+        self._redis.expire(f"{key}:chunks", seconds)
+        try:
+            count = int(marker)
+        except (TypeError, ValueError):
+            return
+        for index in range(count):
+            self._redis.expire(f"{key}:c:{index}", seconds)
+
     def scan_keys(self, match: str) -> list[str]:
         cursor = 0
         found: list[str] = []
@@ -203,6 +218,9 @@ class _TcpStore:
         self._redis.rpush(key, value.encode("utf-8"))
 
     def expire(self, key: str, seconds: int) -> None:
+        self._redis.expire(key, seconds)
+
+    def expire_bytes(self, key: str, seconds: int) -> None:
         self._redis.expire(key, seconds)
 
     def scan_keys(self, match: str) -> list[str]:
@@ -307,7 +325,7 @@ def purge_expired_sessions(now: float | None = None) -> None:
                 del _MEMORY_SESSIONS[key]
 
 
-def load_session(session_id: str) -> dict | None:
+def load_session(session_id: str, load_files: bool = True) -> dict | None:
     if not session_id:
         return None
     store = get_store()
@@ -319,22 +337,36 @@ def load_session(session_id: str) -> dict | None:
             meta = json.loads(meta_raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
+        file_info = meta.get("files") or {}
         files: dict[str, dict] = {}
-        for name, info in (meta.get("files") or {}).items():
-            data = store.get_bytes(f"kpt:sess:{session_id}:file:{name}")
-            if data is None:
-                continue
-            files[name] = {
-                "data": data,
-                "mtime": float(info.get("mtime") or time.time()),
-                "kind": info.get("kind") or "unknown",
-            }
+        if load_files:
+            for name, info in file_info.items():
+                size = int(info.get("size") or 0)
+                if is_vercel() and size > MAX_VERCEL_FILE_BYTES:
+                    files[name] = {
+                        "data": b"",
+                        "mtime": float(info.get("mtime") or time.time()),
+                        "kind": info.get("kind") or "unknown",
+                        "too_large": True,
+                        "size": size,
+                    }
+                    continue
+                data = store.get_bytes(f"kpt:sess:{session_id}:file:{name}")
+                if data is None:
+                    continue
+                files[name] = {
+                    "data": data,
+                    "mtime": float(info.get("mtime") or time.time()),
+                    "kind": info.get("kind") or "unknown",
+                }
         return {
             "files": files,
             "state": meta.get("state") or {},
             "user": meta.get("user") or "",
             "admin": bool(meta.get("admin")),
             "updated": float(meta.get("updated") or time.time()),
+            "_file_info": file_info,
+            "_files_loaded": load_files,
         }
 
     with _lock:
@@ -345,13 +377,32 @@ def save_session(session_id: str, session: dict) -> None:
     session["updated"] = time.time()
     store = get_store()
     if store is not None:
+        if session.get("_files_loaded") is False:
+            previous_raw = store.get_bytes(f"kpt:sess:{session_id}:meta")
+            if not previous_raw:
+                return
+            try:
+                meta = json.loads(previous_raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return
+            meta["user"] = session.get("user") or ""
+            meta["admin"] = bool(session.get("admin"))
+            meta["state"] = session.get("state") or {}
+            meta["updated"] = session["updated"]
+            store.set_bytes(
+                f"kpt:sess:{session_id}:meta",
+                json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+                ex=SESSION_TTL,
+            )
+            touch_session(session_id)
+            return
         previous_raw = store.get_bytes(f"kpt:sess:{session_id}:meta")
-        previous_files = set()
+        previous_info: dict = {}
         if previous_raw:
             try:
-                previous_files = set((json.loads(previous_raw.decode("utf-8")).get("files") or {}).keys())
+                previous_info = json.loads(previous_raw.decode("utf-8")).get("files") or {}
             except (UnicodeDecodeError, json.JSONDecodeError):
-                previous_files = set()
+                previous_info = {}
 
         files = session.get("files") or {}
         meta = {
@@ -360,8 +411,13 @@ def save_session(session_id: str, session: dict) -> None:
             "state": session.get("state") or {},
             "updated": session["updated"],
             "files": {
-                name: {"mtime": item.get("mtime"), "kind": item.get("kind"), "size": len(item.get("data") or b"")}
+                name: {
+                    "mtime": item.get("mtime"),
+                    "kind": item.get("kind"),
+                    "size": int(item.get("size") or len(item.get("data") or b"")),
+                }
                 for name, item in files.items()
+                if not item.get("too_large")
             },
         }
         store.set_bytes(
@@ -369,13 +425,40 @@ def save_session(session_id: str, session: dict) -> None:
             json.dumps(meta, ensure_ascii=False).encode("utf-8"),
             ex=SESSION_TTL,
         )
-        keep = set(files)
+        keep = set(meta["files"])
         for name, item in files.items():
-            store.set_bytes(f"kpt:sess:{session_id}:file:{name}", item.get("data") or b"", ex=SESSION_TTL)
-        removed = previous_files - keep
+            if item.get("too_large"):
+                continue
+            data = item.get("data") or b""
+            prev = previous_info.get(name) or {}
+            if prev.get("size") == len(data) and prev.get("mtime") == item.get("mtime"):
+                store.expire_bytes(f"kpt:sess:{session_id}:file:{name}", SESSION_TTL)
+                continue
+            store.set_bytes(f"kpt:sess:{session_id}:file:{name}", data, ex=SESSION_TTL)
+        removed = set(previous_info) - keep
         if removed:
             store.delete(*(f"kpt:sess:{session_id}:file:{name}" for name in removed))
         return
+
+
+def touch_session(session_id: str) -> None:
+    """Verleng TTL zonder grote bestanden opnieuw te schrijven."""
+    if not session_id:
+        return
+    store = get_store()
+    if store is None:
+        return
+    meta_key = f"kpt:sess:{session_id}:meta"
+    meta_raw = store.get_bytes(meta_key)
+    if not meta_raw:
+        return
+    store.expire_bytes(meta_key, SESSION_TTL)
+    try:
+        names = (json.loads(meta_raw.decode("utf-8")).get("files") or {}).keys()
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    for name in names:
+        store.expire_bytes(f"kpt:sess:{session_id}:file:{name}", SESSION_TTL)
 
     with _lock:
         _MEMORY_SESSIONS[session_id] = session

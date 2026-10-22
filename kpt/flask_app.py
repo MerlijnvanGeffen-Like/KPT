@@ -30,7 +30,16 @@ def create_app() -> Flask:
             return
         storage.purge_expired_sessions()
         session_id = request.cookies.get("kpt_session") or ""
-        session = storage.load_session(session_id)
+        light_get = request.method in {"GET", "HEAD", "OPTIONS"} and request.path.rstrip("/") in {
+            "/api/auth/status",
+            "/api/health",
+            "/api/files",
+            "/api/planning",
+            "/api/weeks",
+            "/api/pdf-customers",
+            "/api/invoice-files",
+        }
+        session = storage.load_session(session_id, load_files=not light_get)
         new_cookie = False
         if session is None:
             session_id = storage.new_session_id()
@@ -41,12 +50,16 @@ def create_app() -> Flask:
         g.session_id = session_id
         g.session = session
         g.new_session_cookie = new_cookie
+        g.session_dirty = request.method not in {"GET", "HEAD", "OPTIONS"}
 
     @app.after_request
     def finish_session(response: Response):
         if not hasattr(g, "session_id"):
             return response
-        storage.save_session(g.session_id, g.session)
+        if getattr(g, "session_dirty", True) or getattr(g, "new_session_cookie", False):
+            storage.save_session(g.session_id, g.session)
+        else:
+            storage.touch_session(g.session_id)
         if getattr(g, "new_session_cookie", False):
             secure = request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
             response.set_cookie(
@@ -79,6 +92,17 @@ def create_app() -> Flask:
 
     def uploaded_files() -> dict:
         return g.session.get("files") or {}
+
+    def preview_cache() -> dict:
+        return (g.session.get("state") or {}).get("preview") or {}
+
+    def file_info() -> dict:
+        return g.session.get("_file_info") or {}
+
+    def refresh_preview() -> dict:
+        cache = core.build_preview_cache(uploaded_files())
+        g.session.setdefault("state", {})["preview"] = cache
+        return cache
 
     def attachment(data: bytes, filename: str, content_type: str):
         response = Response(data, mimetype=content_type)
@@ -212,6 +236,8 @@ def create_app() -> Flask:
             return denied
         g.session["files"].clear()
         g.session["state"] = {}
+        g.session["_file_info"] = {}
+        g.session["_files_loaded"] = True
         return jsonify({"ok": True})
 
     @app.get("/api/files")
@@ -219,14 +245,28 @@ def create_app() -> Flask:
         denied = require_auth()
         if denied:
             return denied
-        return jsonify({"files": core.list_report_files(uploaded_files())})
+        cache = preview_cache()
+        if cache.get("reports") is not None:
+            return jsonify({"files": cache["reports"]})
+        info = file_info()
+        files = [
+            {"name": name, "size": int(item.get("size") or 0), "mtime": int(float(item.get("mtime") or 0))}
+            for name, item in info.items()
+            if item.get("kind") == "report"
+        ]
+        files.sort(key=lambda item: item["mtime"], reverse=True)
+        return jsonify({"files": files})
 
     @app.get("/api/planning")
     def planning():
         denied = require_auth()
         if denied:
             return denied
-        return jsonify(core.parse_week_files(uploaded_files()))
+        cache = preview_cache()
+        if cache.get("planningFiles") is not None:
+            return jsonify({"files": cache["planningFiles"], "rows": []})
+        names = [name for name, item in file_info().items() if item.get("kind") == "planning"]
+        return jsonify({"files": names, "rows": []})
 
     @app.get("/api/invoice-files")
     def invoice_files():
@@ -241,7 +281,14 @@ def create_app() -> Flask:
         if denied:
             return denied
         try:
-            return jsonify({"weeks": core.list_weeks(uploaded_files())})
+            cache = preview_cache()
+            if cache.get("weeks") is not None:
+                return jsonify({"weeks": cache["weeks"]})
+            loaded = storage.load_session(g.session_id, load_files=True)
+            if loaded:
+                g.session = loaded
+            g.session_dirty = True
+            return jsonify({"weeks": refresh_preview()["weeks"]})
         except Exception as exc:
             return json_error(str(exc), 400)
 
@@ -263,12 +310,21 @@ def create_app() -> Flask:
             return denied
         week = request.args.get("week") or ""
         try:
+            cache = preview_cache()
             if not week:
-                weeks = core.list_weeks(uploaded_files())
+                weeks = cache.get("weeks") or []
                 week = weeks[0]["id"] if weeks else ""
             if not week:
                 return json_error("Upload eerst een weekplanning (rittenboek).", 400)
-            payload = core.list_pdf_customers(week, uploaded_files())
+            payload = (cache.get("pdf") or {}).get(week)
+            if payload is None:
+                loaded = storage.load_session(g.session_id, load_files=True)
+                if loaded:
+                    g.session = loaded
+                g.session_dirty = True
+                payload = (refresh_preview().get("pdf") or {}).get(week)
+            if payload is None:
+                return json_error("Week niet gevonden in het rittenboek", 400)
             return jsonify(payload)
         except Exception as exc:
             return json_error(str(exc), 400)
@@ -371,8 +427,19 @@ def create_app() -> Flask:
                 return json_error("De tijdelijke sessie mag maximaal 550 MB bevatten.", 413)
             if len(data) > storage.MAX_UPLOAD_BYTES:
                 return json_error("Dit bestand is groter dan 500 MB en kan niet worden verwerkt.", 413)
+            if storage.is_vercel() and expected == "report" and len(data) > storage.MAX_VERCEL_FILE_BYTES:
+                return json_error(
+                    "Dit rapport is te groot voor de website. Upload eerst het rittenboek; "
+                    "de browser stuurt daarna alleen de regels van die week.",
+                    413,
+                )
             files[name] = {"data": data, "mtime": time.time(), "kind": kind}
             g.session["files"] = files
+            g.session["_files_loaded"] = True
+            try:
+                refresh_preview()
+            except Exception:
+                (g.session.get("state") or {}).pop("preview", None)
             return jsonify({"ok": True, "name": name, "kind": kind})
         except Exception as exc:
             return json_error(str(exc), 400)

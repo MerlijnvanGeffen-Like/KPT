@@ -952,6 +952,7 @@ def build_customer_pdf_rows(
     week_id: str, uploaded: dict
 ) -> tuple[dict, dict[str, list[dict]]]:
     """Rittenboek is leidend: overzicht per klant in die week. Tol komt uit alle rapporten."""
+    _reject_unusable_uploads(uploaded)
     planning = parse_week_files(uploaded)
     if planning.get("error"):
         raise ValueError(planning["error"])
@@ -1341,7 +1342,17 @@ def _rows_for_customer(by_customer: dict[str, list[dict]], name: str) -> list[di
     return None
 
 
+def _reject_unusable_uploads(uploaded: dict) -> None:
+    huge = [name for name, item in uploaded.items() if item.get("too_large")]
+    if huge:
+        raise ValueError(
+            "Het tolrapport in deze sessie is te groot voor de website. "
+            "Klik Wissen, upload eerst het rittenboek en daarna opnieuw het CSV."
+        )
+
+
 def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
+    _reject_unusable_uploads(uploaded)
     meta, by_customer = build_customer_pdf_rows(week_id, uploaded)
     merged: dict[str, dict] = {}
     for customer, rows in by_customer.items():
@@ -1385,7 +1396,25 @@ def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
     return {
         **meta,
         "customers": customers,
-        "coverage": check_reports_against_planning(uploaded),
+    }
+
+
+def build_preview_cache(uploaded: dict) -> dict:
+    """Lichte JSON voor Vercel GET /api/weeks en /api/pdf-customers."""
+    weeks = list_weeks(uploaded)
+    pdf = {}
+    for week in weeks:
+        pdf[week["id"]] = list_pdf_customers(week["id"], uploaded)
+    planning = [
+        name
+        for name, item in uploaded.items()
+        if item.get("kind") == "planning"
+    ]
+    return {
+        "weeks": weeks,
+        "pdf": pdf,
+        "planningFiles": sorted(planning),
+        "reports": list_report_files(uploaded),
     }
 
 
