@@ -7,6 +7,7 @@ from io import BytesIO
 
 from pypdf import PdfReader
 
+from kpt.storage import merge_file_catalog
 from kpt.core import (
     _allocate_plan_km_by_country,
     _correct_french_km,
@@ -41,6 +42,27 @@ def trx(**kwargs):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_session_keeps_other_week_files(self):
+        previous = {
+            "Week 39-2026.xls": {"mtime": 1, "kind": "planning", "size": 10},
+            "rapport.csv": {"mtime": 2, "kind": "report", "size": 20},
+        }
+        incoming = {
+            "rapport.csv": {"data": b"csv", "mtime": 2, "kind": "report", "size": 20},
+            "Week 40-2026.xls": {"data": b"xls", "mtime": 3, "kind": "planning"},
+        }
+        catalog = merge_file_catalog(previous, incoming, loaded_kinds={"report"})
+        self.assertEqual(
+            set(catalog),
+            {"Week 39-2026.xls", "Week 40-2026.xls", "rapport.csv"},
+        )
+        only_new_week = merge_file_catalog(
+            {"Week 39-2026.xls": {"mtime": 1, "kind": "planning", "size": 10}},
+            {"Week 40-2026.xls": {"data": b"xls", "mtime": 3, "kind": "planning"}},
+            loaded_kinds={"report"},
+        )
+        self.assertEqual(set(only_new_week), {"Week 39-2026.xls", "Week 40-2026.xls"})
+
     def test_parse_all_reports_keeps_every_file(self):
         header = "Trx ID;Trx Date;Truck PlateNr;Trx Country;Distance KM;Total Amt (EUR);Billing Status"
         uploaded = {

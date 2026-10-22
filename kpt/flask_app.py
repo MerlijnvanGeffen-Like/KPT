@@ -436,6 +436,7 @@ def create_app() -> Flask:
             if kind == "unknown":
                 return json_error(f"{name} wordt niet herkend als tolrapport of weekplanning.", 400)
             if (request.args.get("replace") or "") == "1" and expected in {"report", "planning"}:
+                g.session["_drop_kinds"] = {expected, "invoice"}
                 files = {
                     key: item
                     for key, item in files.items()
@@ -455,7 +456,6 @@ def create_app() -> Flask:
                 )
             files[name] = {"data": data, "mtime": time.time(), "kind": kind}
             g.session["files"] = files
-            g.session["_files_loaded"] = True
             (g.session.setdefault("state", {})).pop("preview", None)
             return jsonify({"ok": True, "name": name, "kind": kind})
         except Exception as exc:

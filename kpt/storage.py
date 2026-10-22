@@ -369,17 +369,60 @@ def load_session(session_id: str, load_files: bool = True, kinds: set[str] | Non
             "updated": float(meta.get("updated") or time.time()),
             "_file_info": file_info,
             "_files_loaded": bool(load_files and not kinds),
+            "_loaded_kinds": sorted(kinds) if kinds else None,
         }
 
     with _lock:
         return _MEMORY_SESSIONS.get(session_id)
 
 
+def _file_meta(item: dict) -> dict:
+    return {
+        "mtime": item.get("mtime"),
+        "kind": item.get("kind"),
+        "size": int(item.get("size") or len(item.get("data") or b"")),
+    }
+
+
+def merge_file_catalog(
+    previous_info: dict,
+    files: dict,
+    loaded_kinds: set[str] | None = None,
+    drop_kinds: set[str] | None = None,
+) -> dict:
+    """Houd bestanden die niet in het geheugen zaten; wis ze niet per ongeluk."""
+    if drop_kinds:
+        previous_info = {
+            name: info
+            for name, info in previous_info.items()
+            if (info.get("kind") or "unknown") not in drop_kinds
+        }
+    if not loaded_kinds:
+        return {
+            name: _file_meta(item)
+            for name, item in files.items()
+            if not item.get("too_large")
+        }
+    catalog = dict(previous_info)
+    for name, item in files.items():
+        if item.get("too_large") and not (item.get("data") or b""):
+            catalog.setdefault(name, _file_meta(item))
+            continue
+        catalog[name] = _file_meta(item)
+    for name in list(catalog):
+        kind = catalog[name].get("kind") or "unknown"
+        if kind in loaded_kinds and name not in files:
+            del catalog[name]
+    return catalog
+
+
 def save_session(session_id: str, session: dict) -> None:
     session["updated"] = time.time()
     store = get_store()
     if store is not None:
-        if session.get("_files_loaded") is False:
+        loaded_kinds = set(session.get("_loaded_kinds") or [])
+        drop_kinds = set(session.get("_drop_kinds") or [])
+        if session.get("_files_loaded") is False and not loaded_kinds:
             previous_raw = store.get_bytes(f"kpt:sess:{session_id}:meta")
             if not previous_raw:
                 return
@@ -406,29 +449,25 @@ def save_session(session_id: str, session: dict) -> None:
                 previous_info = {}
 
         files = session.get("files") or {}
+        catalog = merge_file_catalog(previous_info, files, loaded_kinds or None, drop_kinds or None)
         meta = {
             "user": session.get("user") or "",
             "admin": bool(session.get("admin")),
             "state": session.get("state") or {},
             "updated": session["updated"],
-            "files": {
-                name: {
-                    "mtime": item.get("mtime"),
-                    "kind": item.get("kind"),
-                    "size": int(item.get("size") or len(item.get("data") or b"")),
-                }
-                for name, item in files.items()
-                if not item.get("too_large")
-            },
+            "files": catalog,
         }
         store.set_bytes(
             f"kpt:sess:{session_id}:meta",
             json.dumps(meta, ensure_ascii=False, default=str).encode("utf-8"),
             ex=SESSION_TTL,
         )
-        keep = set(meta["files"])
+        keep = set(catalog)
         for name, item in files.items():
-            if item.get("too_large"):
+            if name not in keep:
+                continue
+            if item.get("too_large") and not (item.get("data") or b""):
+                store.expire_bytes(f"kpt:sess:{session_id}:file:{name}", SESSION_TTL)
                 continue
             data = item.get("data") or b""
             prev = previous_info.get(name) or {}
@@ -436,6 +475,10 @@ def save_session(session_id: str, session: dict) -> None:
                 store.expire_bytes(f"kpt:sess:{session_id}:file:{name}", SESSION_TTL)
                 continue
             store.set_bytes(f"kpt:sess:{session_id}:file:{name}", data, ex=SESSION_TTL)
+        for name in keep:
+            if name in files:
+                continue
+            store.expire_bytes(f"kpt:sess:{session_id}:file:{name}", SESSION_TTL)
         removed = set(previous_info) - keep
         if removed:
             store.delete(*(f"kpt:sess:{session_id}:file:{name}" for name in removed))
@@ -460,9 +503,6 @@ def touch_session(session_id: str) -> None:
         return
     for name in names:
         store.expire_bytes(f"kpt:sess:{session_id}:file:{name}", SESSION_TTL)
-
-    with _lock:
-        _MEMORY_SESSIONS[session_id] = session
 
 
 def delete_session(session_id: str) -> None:
