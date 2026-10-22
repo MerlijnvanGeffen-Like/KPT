@@ -12,6 +12,8 @@ from kpt.core import (
     _allocate_plan_km_by_country,
     _correct_french_km,
     _fill_incomplete_french_km,
+    _assign_plan,
+    _plan_index,
     _resolve_plan,
     collapse_detail_summaries,
     dedupe_report_rows,
@@ -128,6 +130,39 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(by_country["Nederland"], 20.0)
         self.assertEqual(by_country["Frankrijk"], 700.0)
         self.assertEqual(sum(by_country.values()), 760.0)
+
+    def test_toll_is_assigned_to_only_one_week(self):
+        def plan(week, day, ritnr):
+            return {
+                "week": week,
+                "date": day,
+                "plate": "X",
+                "customer": "TNT",
+                "km": 100,
+                "tripNumber": ritnr,
+                "plateRaw": "X",
+            }
+
+        index = _plan_index(
+            [
+                plan("Week 36-2026", "2026-09-01", "36a"),
+                plan("Week 36-2026", "2026-09-04", "36b"),
+                plan("Week 36-2026", "2026-09-06", "36c"),
+                plan("Week 37-2026", "2026-09-03", "37a"),
+                plan("Week 37-2026", "2026-09-07", "37b"),
+                plan("Week 37-2026", "2026-09-08", "37c"),
+            ]
+        )
+        plan36, exact36 = _assign_plan("2026-09-04", "X", index)
+        self.assertTrue(exact36)
+        self.assertEqual(plan36["week"], "Week 36-2026")
+        plan37, exact37 = _assign_plan("2026-09-07", "X", index)
+        self.assertTrue(exact37)
+        self.assertEqual(plan37["week"], "Week 37-2026")
+        nearest, nearest_exact = _assign_plan("2026-09-05", "X", index)
+        self.assertFalse(nearest_exact)
+        self.assertEqual(nearest["week"], "Week 36-2026")
+        self.assertIs(_assign_plan("2026-09-05", "X", index)[0], nearest)
 
     def test_same_plate_other_day_in_week_still_matches(self):
         plan = {"date": "2026-09-21", "plate": "46BNT5", "customer": "Raben", "km": 181, "tripNumber": "677664"}

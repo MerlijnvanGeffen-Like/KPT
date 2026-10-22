@@ -958,6 +958,70 @@ def _resolve_plan(
     return closest, False
 
 
+def _iso_week_label(iso_date: str) -> str:
+    try:
+        day = datetime.strptime(iso_date, "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    iso = day.isocalendar()
+    return f"Week {iso.week}-{iso.year}"
+
+
+def _plan_index(plan_rows: list[dict]) -> dict:
+    """Index over alle weekbestanden samen, zodat een tolregel maar één week krijgt."""
+    exact: dict[tuple[str, str], dict] = {}
+    by_week_plate: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    bounds: dict[str, dict] = {}
+    for row in plan_rows:
+        week = row["week"]
+        item = bounds.setdefault(week, {"from": row["date"], "to": row["date"]})
+        item["from"] = min(item["from"], row["date"])
+        item["to"] = max(item["to"], row["date"])
+        by_week_plate[(week, row["plate"])].append(row)
+        key = (row["date"], row["plate"])
+        current = exact.get(key)
+        if current is None:
+            exact[key] = row
+            continue
+        iso_label = _iso_week_label(row["date"])
+        if row["week"] == iso_label and current["week"] != iso_label:
+            exact[key] = row
+        elif current["week"] != iso_label and row["week"] < current["week"]:
+            exact[key] = row
+    return {"exact": exact, "by_week_plate": by_week_plate, "bounds": bounds}
+
+
+def _assign_plan(iso_date: str, plate: str, index: dict) -> tuple[dict | None, bool]:
+    """Eén rit, één week: exacte dag wint; anders de dichtstbijzijnde rit in precies één week."""
+    exact = (index.get("exact") or {}).get((iso_date, plate))
+    if exact:
+        return exact, True
+    if not iso_date:
+        return None, False
+    try:
+        target = datetime.strptime(iso_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None, False
+    best: dict | None = None
+    best_key = None
+    for week, bounds in (index.get("bounds") or {}).items():
+        if not (bounds["from"] <= iso_date <= bounds["to"]):
+            continue
+        rows = (index.get("by_week_plate") or {}).get((week, plate)) or []
+        if not rows:
+            continue
+        closest = min(
+            rows,
+            key=lambda row: abs((datetime.strptime(row["date"], "%Y-%m-%d").date() - target).days),
+        )
+        delta = abs((datetime.strptime(closest["date"], "%Y-%m-%d").date() - target).days)
+        key = (delta, week)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = closest
+    return best, False
+
+
 def build_customer_pdf_rows(
     week_id: str, uploaded: dict
 ) -> tuple[dict, dict[str, list[dict]]]:
@@ -966,14 +1030,12 @@ def build_customer_pdf_rows(
     planning = parse_week_files(uploaded)
     if planning.get("error"):
         raise ValueError(planning["error"])
-    plan_rows = [row for row in (planning.get("rows") or []) if row["week"] == week_id]
+    all_plan_rows = planning.get("rows") or []
+    plan_rows = [row for row in all_plan_rows if row["week"] == week_id]
     if not plan_rows:
         raise ValueError("Week niet gevonden in het rittenboek")
 
-    plan_map = {(row["date"], row["plate"]): row for row in plan_rows}
-    plan_by_plate: dict[str, list[dict]] = defaultdict(list)
-    for row in plan_rows:
-        plan_by_plate[row["plate"]].append(row)
+    index = _plan_index(all_plan_rows)
     week_from = min(row["date"] for row in plan_rows)
     week_to = max(row["date"] for row in plan_rows)
     transactions, report_names = parse_all_reports(uploaded)
@@ -986,9 +1048,9 @@ def build_customer_pdf_rows(
     for transaction in transactions:
         iso_date = dmy_iso(transaction.get("date") or "")
         plate = transaction["plate"]
-        plan, exact = _resolve_plan(iso_date, plate, plan_map, plan_by_plate, week_from, week_to)
-        if not plan:
-            if iso_date and week_from <= iso_date <= week_to:
+        plan, exact = _assign_plan(iso_date, plate, index)
+        if not plan or plan.get("week") != week_id:
+            if not plan and iso_date and week_from <= iso_date <= week_to:
                 unmatched_rows += 1
                 unmatched_eur += transaction["eur"]
             continue
