@@ -15,6 +15,7 @@ from kpt.core import (
     collapse_detail_summaries,
     dedupe_report_rows,
     dmy_iso,
+    parse_all_reports,
 )
 from maak_pdf_per_klant import make_pdf_bytes
 
@@ -40,6 +41,25 @@ def trx(**kwargs):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_parse_all_reports_keeps_every_file(self):
+        header = "Trx ID;Trx Date;Truck PlateNr;Trx Country;Distance KM;Total Amt (EUR);Billing Status"
+        uploaded = {
+            "week39.csv": {
+                "data": f"{header}\n1;21/09/2026;11-AAA-1;NL;10;5.00;Billed\n".encode(),
+                "mtime": 1,
+                "kind": "report",
+            },
+            "week40.csv": {
+                "data": f"{header}\n2;28/09/2026;22-BBB-2;BE;8;3.50;Billed\n".encode(),
+                "mtime": 2,
+                "kind": "report",
+            },
+        }
+        rows, names = parse_all_reports(uploaded)
+        self.assertEqual(sorted(names), ["week39.csv", "week40.csv"])
+        self.assertEqual({row["plate"] for row in rows}, {"11AAA1", "22BBB2"})
+        self.assertAlmostEqual(sum(row["eur"] for row in rows), 8.5)
+
     def test_dmy_iso_accepts_separators(self):
         self.assertEqual(dmy_iso("22/09/2026"), "2026-09-22")
         self.assertEqual(dmy_iso("22-09-2026"), "2026-09-22")

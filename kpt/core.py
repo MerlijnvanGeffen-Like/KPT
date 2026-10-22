@@ -733,10 +733,8 @@ def dedupe_report_rows(rows: list[dict]) -> list[dict]:
 
 
 def parse_all_reports(uploaded: dict) -> tuple[list[dict], list[str]]:
-    """Alleen de geüploade tolrapporten in de sessie, geen extra bestanden van schijf."""
+    """Alle geüploade tolrapporten in de sessie, gededupliceerd op transactie."""
     reports = list_report_files(uploaded)
-    if len(reports) > 1:
-        reports = [max(reports, key=lambda item: (item.get("mtime") or 0, item["name"]))]
     names = [item["name"] for item in reports]
     rows: list[dict] = []
     for name in names:

@@ -435,7 +435,6 @@ def create_app() -> Flask:
                 return json_error(f"{name} is geen geldig {labels[expected]}.", 400)
             if kind == "unknown":
                 return json_error(f"{name} wordt niet herkend als tolrapport of weekplanning.", 400)
-            # Alleen de bestanden van deze upload: geen oude CSV's of extra rapporten meenemen.
             if (request.args.get("replace") or "") == "1" and expected in {"report", "planning"}:
                 files = {
                     key: item

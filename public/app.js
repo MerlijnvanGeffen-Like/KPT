@@ -403,7 +403,8 @@ async function deleteUser(username) {
 }
 
 function selectedWeek() {
-  return els.weekSelect.value || "";
+  const value = els.weekSelect.value || "";
+  return value === "__all__" ? "" : value;
 }
 
 async function loadSources() {
@@ -424,13 +425,18 @@ async function loadSources() {
   els.sourceStatus.hidden = !reports.length && !weekFiles.length;
 
   weeks = weekData.weeks || [];
-  const previous = selectedWeek();
+  const previous = els.weekSelect.value;
   els.weekSelect.disabled = weeks.length === 0;
-  els.weekSelect.innerHTML = weeks.map((week) => {
+  const allOption = weeks.length > 1
+    ? `<option value="__all__">Alle weken (${weeks.length})</option>`
+    : "";
+  els.weekSelect.innerHTML = allOption + weeks.map((week) => {
     const period = week.from && week.to ? ` · ${week.from} t/m ${week.to}` : "";
     return `<option value="${escapeAttr(week.id)}">${escapeHtml(`${week.id}${period}`)}</option>`;
   }).join("");
-  if (previous && weeks.some((week) => week.id === previous)) {
+  if (previous === "__all__" && weeks.length > 1) {
+    els.weekSelect.value = "__all__";
+  } else if (previous && weeks.some((week) => week.id === previous)) {
     els.weekSelect.value = previous;
   }
   if (!weeks.length && reports.length) {
@@ -476,7 +482,9 @@ function renderCompanies() {
   els.summary.innerHTML = selectedWeek()
     ? `<span><b>${companies.length}</b> klanten</span>
        <span><b>${euro.format(total)}</b> tol</span>`
-    : "";
+    : (weeks.length > 1
+      ? `<span><b>${weeks.length}</b> weken klaar</span><span>Kies een week voor de lijst, of download Alle PDF’s.</span>`
+      : "");
 
   const notes = (weekMeta.qualityNotes || []).filter((note) => note.text);
   if (notes.length) {
@@ -488,7 +496,7 @@ function renderCompanies() {
   }
 
   els.resultsSection.hidden = weeks.length === 0 && reports.length === 0;
-  els.zipInvoiceBtn.disabled = !selectedWeek();
+  els.zipInvoiceBtn.disabled = weeks.length === 0;
 
   if (!visible.length) {
     els.companyRows.innerHTML = companies.length
@@ -508,18 +516,19 @@ function renderCompanies() {
     </tr>`).join("");
 }
 
-async function postUpload(file, expectedKind, replace) {
+async function postUpload(file, expectedKind) {
   const prepared = await gzipFileIfHelpful(file);
   if (onVercelHost() && prepared.blob.size > 4 * 1024 * 1024) {
     throw new Error(
-      "De weekdata zijn na comprimeren nog te groot voor de website. Probeer één weekrittenboek tegelijk.",
+      "Dit bestand is na comprimeren nog te groot voor de website. "
+      + "Kies kleinere weekbestanden of filter het CSV op de weken in het rittenboek.",
     );
   }
   const body = new FormData();
   body.append("file", prepared.blob, file.name);
   if (prepared.compressed) body.append("compressed", "gzip");
   const response = await fetch(
-    "/api/upload?expected=" + encodeURIComponent(expectedKind) + (replace ? "&replace=1" : ""),
+    "/api/upload?expected=" + encodeURIComponent(expectedKind),
     { method: "POST", body },
   );
   const data = await readJson(response);
@@ -562,7 +571,10 @@ async function uploadFiles(fileList, expectedKind) {
     const ranges = await weekRangesFromServer();
     if (!ranges.length) {
       pendingReportFiles = files;
-      setStatus("CSV staat klaar. Upload eerst het rittenboek; daarna sturen we alleen die week.", "success");
+      setStatus(
+        "CSV staat klaar. Upload eerst de weekbestanden; daarna filteren we op alle weken in het rittenboek.",
+        "success",
+      );
       return;
     }
   }
@@ -579,7 +591,7 @@ async function uploadFiles(fileList, expectedKind) {
       setStatus(`Uploaden ${index + 1} van ${files.length}: ${file.name}`);
       updateLoading(10 + (index / files.length) * 55, file.name);
       if (expectedKind === "report") file = await prepareReportFile(file, ranges, index, files.length);
-      await postUpload(file, expectedKind, index === 0);
+      await postUpload(file, expectedKind);
       updateLoading(10 + ((index + 1) / files.length) * 55, file.name);
     }
     setStatus(
@@ -599,7 +611,7 @@ async function uploadFiles(fileList, expectedKind) {
         let file = leftover[index];
         updateLoading(45 + (index / leftover.length) * 35, file.name);
         file = await prepareReportFile(file, ranges, index, leftover.length);
-        await postUpload(file, "report", index === 0);
+        await postUpload(file, "report");
       }
       await loadSources();
     }
@@ -682,8 +694,10 @@ function downloadCompany(customer, button) {
 
 function downloadZip(button) {
   const week = selectedWeek();
-  const url = "/api/customer-pdfs.zip?week=" + encodeURIComponent(week);
-  const name = `Toloverzichten_${week}.zip`;
+  const url = week
+    ? "/api/customer-pdfs.zip?week=" + encodeURIComponent(week)
+    : "/api/customer-pdfs.zip";
+  const name = week ? `Toloverzichten_${week}.zip` : "Toloverzichten_alle_weken.zip";
   return downloadFile(url, button, name, true);
 }
 
