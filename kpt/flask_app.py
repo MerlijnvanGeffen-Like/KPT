@@ -368,9 +368,9 @@ def create_app() -> Flask:
             current_size = sum(len(item["data"]) for item in files.values())
             previous_size = len(files.get(name, {}).get("data", b""))
             if current_size - previous_size + len(data) > storage.MAX_SESSION_BYTES:
-                return json_error("De tijdelijke sessie mag maximaal 100 MB bevatten.", 413)
-            if len(data) > 25 * 1024 * 1024:
-                return json_error("Dit bestand is groter dan 25 MB en kan niet worden verwerkt.", 413)
+                return json_error("De tijdelijke sessie mag maximaal 550 MB bevatten.", 413)
+            if len(data) > storage.MAX_UPLOAD_BYTES:
+                return json_error("Dit bestand is groter dan 500 MB en kan niet worden verwerkt.", 413)
             files[name] = {"data": data, "mtime": time.time(), "kind": kind}
             g.session["files"] = files
             return jsonify({"ok": True, "name": name, "kind": kind})

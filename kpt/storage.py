@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 SESSION_TTL = int(os.environ.get("KPT_SESSION_TTL", str(2 * 60 * 60)))
-MAX_SESSION_BYTES = 100 * 1024 * 1024
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+MAX_SESSION_BYTES = 550 * 1024 * 1024
 _B64 = "b64:"
 # Upstash free/REST: houd encoded chunks onder ~750 KB.
 _REST_CHUNK_CHARS = 700_000

@@ -46,6 +46,7 @@ let reports = [];
 let weeks = [];
 let companies = [];
 let weekMeta = {};
+let pendingReportFiles = [];
 let authState = { setupRequired: false, authenticated: false, username: "", admin: false };
 let loadingHideTimer = null;
 
@@ -67,7 +68,7 @@ async function readJson(response) {
   if (!contentType.includes("application/json")) {
     if (response.status === 413) {
       throw new Error(
-        "Bestand is te groot voor de serverlimiet. De app comprimeert uploads automatisch — vernieuw de pagina en probeer opnieuw, of gebruik start.bat lokaal."
+        "Upload is te groot voor de website. Upload eerst het rittenboek; van een groot CSV sturen we alleen die week."
       );
     }
     if (response.status === 503 || response.status === 500) {
@@ -82,6 +83,90 @@ async function readJson(response) {
     );
   }
   return response.json();
+}
+
+function csvDateToIso(value) {
+  const raw = String(value || "").replace(/^['"]+|['"]+$/g, "").trim();
+  const dmy = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/);
+  if (dmy) {
+    const year = dmy[3].length === 2 ? `20${dmy[3]}` : dmy[3];
+    return `${year}-${dmy[2].padStart(2, "0")}-${dmy[1].padStart(2, "0")}`;
+  }
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return iso ? `${iso[1]}-${iso[2]}-${iso[3]}` : "";
+}
+
+function dateInRanges(iso, ranges) {
+  return Boolean(iso && ranges.some((range) => iso >= range.from && iso <= range.to));
+}
+
+async function weekRangesFromServer() {
+  const data = await getJson("/api/weeks").catch(() => ({ weeks: [] }));
+  return (data.weeks || [])
+    .filter((week) => week.from && week.to)
+    .map((week) => ({ from: week.from, to: week.to }));
+}
+
+function csvHeaderMeta(headerLine) {
+  const semi = headerLine.split(";");
+  const comma = headerLine.split(",");
+  const delim = semi.length >= comma.length ? ";" : ",";
+  const cols = delim === ";" ? semi : comma;
+  const idx = cols.findIndex((col) => /trx\s*date|^datum$/i.test(String(col).replace(/"/g, "").trim()));
+  return { delim, idx };
+}
+
+async function slimCsvToPlanning(file, ranges, onProgress) {
+  const decoder = new TextDecoder("utf-8");
+  const reader = file.stream().getReader();
+  let leftover = "";
+  let header = "";
+  let meta = null;
+  let total = 0;
+  let kept = 0;
+  const lines = [];
+  const consume = (chunk, last = false) => {
+    leftover += chunk;
+    const parts = leftover.split(/\r?\n/);
+    leftover = last ? "" : parts.pop() || "";
+    for (const line of parts) {
+      if (!meta) {
+        if (!line.trim()) continue;
+        header = line;
+        meta = csvHeaderMeta(line);
+        lines.push(line);
+        continue;
+      }
+      if (!line.trim()) continue;
+      total += 1;
+      if (meta.idx < 0) {
+        kept += 1;
+        lines.push(line);
+        continue;
+      }
+      const cols = line.split(meta.delim);
+      const iso = csvDateToIso(cols[meta.idx] || "");
+      if (dateInRanges(iso, ranges)) {
+        kept += 1;
+        lines.push(line);
+      }
+    }
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      consume("", true);
+      break;
+    }
+    consume(decoder.decode(value, { stream: true }));
+    if (onProgress) onProgress(total, kept);
+  }
+  if (!header) throw new Error("Dit CSV-bestand heeft geen kopregel.");
+  if (!kept) {
+    throw new Error("In dit rapport staan geen tolregels in de datums van het rittenboek.");
+  }
+  const blob = new Blob([`${lines.join("\n")}\n`], { type: "text/csv" });
+  return { file: new File([blob], file.name, { type: "text/csv" }), total, kept };
 }
 
 async function gzipFileIfHelpful(file) {
@@ -133,8 +218,10 @@ function showLoading(title, text, percent = 5) {
 }
 
 function updateLoading(percent, text = "") {
-  const value = Math.max(0, Math.min(100, Math.round(percent)));
-  els.loadingBar.style.width = `${value}%`;
+  if (percent != null && Number.isFinite(Number(percent))) {
+    const value = Math.max(0, Math.min(100, Math.round(percent)));
+    els.loadingBar.style.width = `${value}%`;
+  }
   if (text) els.loadingText.textContent = text;
 }
 
@@ -211,7 +298,8 @@ async function logout() {
   reports = [];
   weeks = [];
   companies = [];
-  weekMeta = {};
+    weekMeta = {};
+  pendingReportFiles = [];
   showAuthentication();
 }
 
@@ -366,6 +454,34 @@ function renderCompanies() {
     </tr>`).join("");
 }
 
+async function postUpload(file, expectedKind, replace) {
+  const prepared = await gzipFileIfHelpful(file);
+  const body = new FormData();
+  body.append("file", prepared.blob, file.name);
+  if (prepared.compressed) body.append("compressed", "gzip");
+  const response = await fetch(
+    "/api/upload?expected=" + encodeURIComponent(expectedKind) + (replace ? "&replace=1" : ""),
+    { method: "POST", body },
+  );
+  const data = await readJson(response);
+  if (!response.ok) throw new Error(data.error || `${file.name} kon niet worden geüpload.`);
+}
+
+async function prepareReportFile(file, ranges, index, total) {
+  if (!/\.csv$/i.test(file.name) || !ranges.length) return file;
+  updateLoading(8 + (index / total) * 20, `${file.name} filteren op week…`);
+  const slim = await slimCsvToPlanning(file, ranges, (seen) => {
+    if (seen && seen % 20000 === 0) {
+      updateLoading(undefined, `${file.name}: ${seen.toLocaleString("nl-NL")} regels gelezen…`);
+    }
+  });
+  setStatus(
+    `${slim.kept.toLocaleString("nl-NL")} van ${slim.total.toLocaleString("nl-NL")} tolregels vallen in het rittenboek.`,
+    "success",
+  );
+  return slim.file;
+}
+
 async function uploadFiles(fileList, expectedKind) {
   let files = [...fileList];
   if (expectedKind === "report") files = files.filter((file) => /\.(csv|xls|xlsx)$/i.test(file.name));
@@ -380,26 +496,28 @@ async function uploadFiles(fileList, expectedKind) {
     return;
   }
 
+  if (expectedKind === "report") {
+    const ranges = await weekRangesFromServer();
+    if (!ranges.length && files.some((file) => /\.csv$/i.test(file.name) && file.size > 1.5 * 1024 * 1024)) {
+      pendingReportFiles = files;
+      setStatus("Groot rapport staat klaar. Upload eerst het rittenboek; daarna sturen we alleen die week naar de server.", "success");
+      return;
+    }
+  }
+
   showLoading("Bestanden verwerken", "Upload…", 5);
   els.reportInput.disabled = true;
   els.planningInput.disabled = true;
   let completed = false;
   try {
+    let ranges = [];
+    if (expectedKind === "report") ranges = await weekRangesFromServer();
     for (let index = 0; index < files.length; index += 1) {
-      const file = files[index];
+      let file = files[index];
       setStatus(`Uploaden ${index + 1} van ${files.length}: ${file.name}`);
       updateLoading(10 + (index / files.length) * 55, file.name);
-      const prepared = await gzipFileIfHelpful(file);
-      const body = new FormData();
-      body.append("file", prepared.blob, file.name);
-      if (prepared.compressed) body.append("compressed", "gzip");
-      const replace = index === 0 ? "&replace=1" : "";
-      const response = await fetch(
-        "/api/upload?expected=" + encodeURIComponent(expectedKind) + replace,
-        { method: "POST", body },
-      );
-      const data = await readJson(response);
-      if (!response.ok) throw new Error(data.error || `${file.name} kon niet worden geüpload.`);
+      if (expectedKind === "report") file = await prepareReportFile(file, ranges, index, files.length);
+      await postUpload(file, expectedKind, index === 0);
       updateLoading(10 + ((index + 1) / files.length) * 55, file.name);
     }
     setStatus(
@@ -410,6 +528,19 @@ async function uploadFiles(fileList, expectedKind) {
     );
     updateLoading(80, "Koppelen…");
     await loadSources();
+    if (expectedKind === "planning" && pendingReportFiles.length) {
+      const leftover = pendingReportFiles;
+      pendingReportFiles = [];
+      updateLoading(40, "Groot tolrapport filteren…");
+      ranges = await weekRangesFromServer();
+      for (let index = 0; index < leftover.length; index += 1) {
+        let file = leftover[index];
+        updateLoading(45 + (index / leftover.length) * 35, file.name);
+        file = await prepareReportFile(file, ranges, index, leftover.length);
+        await postUpload(file, "report", index === 0);
+      }
+      await loadSources();
+    }
     completed = true;
   } catch (error) {
     setStatus(error.message || "Uploaden is mislukt.", "error");
@@ -432,6 +563,7 @@ async function clearSession() {
     weeks = [];
     reports = [];
     weekMeta = {};
+    pendingReportFiles = [];
     setStatus("Bestanden gewist.", "success");
     await loadSources();
   } catch (error) {
