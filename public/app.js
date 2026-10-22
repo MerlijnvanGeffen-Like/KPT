@@ -403,8 +403,7 @@ async function deleteUser(username) {
 }
 
 function selectedWeek() {
-  const value = els.weekSelect.value || "";
-  return value === "__all__" ? "" : value;
+  return els.weekSelect.value || "";
 }
 
 async function loadSources() {
@@ -425,18 +424,13 @@ async function loadSources() {
   els.sourceStatus.hidden = !reports.length && !weekFiles.length;
 
   weeks = weekData.weeks || [];
-  const previous = els.weekSelect.value;
+  const previous = selectedWeek();
   els.weekSelect.disabled = weeks.length === 0;
-  const allOption = weeks.length > 1
-    ? `<option value="__all__">Alle weken (${weeks.length})</option>`
-    : "";
-  els.weekSelect.innerHTML = allOption + weeks.map((week) => {
+  els.weekSelect.innerHTML = weeks.map((week) => {
     const period = week.from && week.to ? ` · ${week.from} t/m ${week.to}` : "";
     return `<option value="${escapeAttr(week.id)}">${escapeHtml(`${week.id}${period}`)}</option>`;
   }).join("");
-  if (previous === "__all__" && weeks.length > 1) {
-    els.weekSelect.value = "__all__";
-  } else if (previous && weeks.some((week) => week.id === previous)) {
+  if (previous && weeks.some((week) => week.id === previous)) {
     els.weekSelect.value = previous;
   }
   if (!weeks.length && reports.length) {
@@ -482,9 +476,7 @@ function renderCompanies() {
   els.summary.innerHTML = selectedWeek()
     ? `<span><b>${companies.length}</b> klanten</span>
        <span><b>${euro.format(total)}</b> tol</span>`
-    : (weeks.length > 1
-      ? `<span><b>${weeks.length}</b> weken klaar</span><span>Kies een week voor de lijst, of download Alle PDF’s.</span>`
-      : "");
+    : "";
 
   const notes = (weekMeta.qualityNotes || []).filter((note) => note.text);
   if (notes.length) {
@@ -496,7 +488,7 @@ function renderCompanies() {
   }
 
   els.resultsSection.hidden = weeks.length === 0 && reports.length === 0;
-  els.zipInvoiceBtn.disabled = weeks.length === 0;
+  els.zipInvoiceBtn.disabled = !selectedWeek();
 
   if (!visible.length) {
     els.companyRows.innerHTML = companies.length
@@ -694,10 +686,9 @@ function downloadCompany(customer, button) {
 
 function downloadZip(button) {
   const week = selectedWeek();
-  const url = week
-    ? "/api/customer-pdfs.zip?week=" + encodeURIComponent(week)
-    : "/api/customer-pdfs.zip";
-  const name = week ? `Toloverzichten_${week}.zip` : "Toloverzichten_alle_weken.zip";
+  if (!week) return;
+  const url = "/api/customer-pdfs.zip?week=" + encodeURIComponent(week);
+  const name = `Toloverzichten_${week}.zip`;
   return downloadFile(url, button, name, true);
 }
 
