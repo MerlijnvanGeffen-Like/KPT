@@ -39,7 +39,18 @@ def create_app() -> Flask:
             "/api/pdf-customers",
             "/api/invoice-files",
         }
-        session = storage.load_session(session_id, load_files=not light_get)
+        upload_kinds = None
+        if request.method == "POST" and request.path.rstrip("/") == "/api/upload":
+            expected = request.args.get("expected") or ""
+            if expected == "report":
+                upload_kinds = {"planning"}
+            elif expected == "planning":
+                upload_kinds = {"report"}
+        session = storage.load_session(
+            session_id,
+            load_files=not light_get,
+            kinds=upload_kinds,
+        )
         new_cookie = False
         if session is None:
             session_id = storage.new_session_id()
@@ -295,11 +306,10 @@ def create_app() -> Flask:
             cache = preview_cache()
             if cache.get("weeks") is not None:
                 return jsonify({"weeks": cache["weeks"]})
-            loaded = storage.load_session(g.session_id, load_files=True)
+            loaded = storage.load_session(g.session_id, load_files=True, kinds={"planning"})
             if loaded:
                 g.session = loaded
-            g.session_dirty = True
-            return jsonify({"weeks": refresh_preview()["weeks"]})
+            return jsonify({"weeks": core.list_weeks(uploaded_files())})
         except Exception as exc:
             return json_error(str(exc), 400)
 
@@ -447,10 +457,7 @@ def create_app() -> Flask:
             files[name] = {"data": data, "mtime": time.time(), "kind": kind}
             g.session["files"] = files
             g.session["_files_loaded"] = True
-            try:
-                refresh_preview()
-            except Exception:
-                (g.session.get("state") or {}).pop("preview", None)
+            (g.session.setdefault("state", {})).pop("preview", None)
             return jsonify({"ok": True, "name": name, "kind": kind})
         except Exception as exc:
             return json_error(str(exc), 400)

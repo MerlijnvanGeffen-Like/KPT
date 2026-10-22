@@ -401,7 +401,7 @@ async function loadSources() {
   const [fileData, planningData, weekData] = await Promise.all([
     getJson("/api/files"),
     getJson("/api/planning"),
-    getJson("/api/weeks").catch(() => ({ weeks: [] })),
+    getJson("/api/weeks"),
   ]);
   reports = fileData.files || [];
   els.reportName.textContent = reports.length
@@ -424,6 +424,9 @@ async function loadSources() {
   if (previous && weeks.some((week) => week.id === previous)) {
     els.weekSelect.value = previous;
   }
+  if (!weeks.length && reports.length) {
+    setStatus("Rittenboek ontbreekt of werd niet herkend. Upload het Week-Excelbestand.", "error");
+  }
   await loadCompanies();
 }
 
@@ -437,10 +440,20 @@ async function loadCompanies() {
   }
 
   els.companyRows.innerHTML = `<tr><td colspan="4" class="loading">Bedrijven laden…</td></tr>`;
-  const data = await getJson("/api/pdf-customers?week=" + encodeURIComponent(week));
-  companies = data.customers || [];
-  weekMeta = data;
-  renderCompanies();
+  try {
+    const data = await getJson("/api/pdf-customers?week=" + encodeURIComponent(week));
+    companies = data.customers || [];
+    weekMeta = data;
+    if (!companies.length) {
+      setStatus("Geen klanten met tol in deze week. Controleer rittenboek en CSV.", "error");
+    }
+    renderCompanies();
+  } catch (error) {
+    companies = [];
+    weekMeta = {};
+    renderCompanies();
+    throw error;
+  }
 }
 
 function renderCompanies() {

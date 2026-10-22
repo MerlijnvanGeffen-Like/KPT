@@ -325,7 +325,7 @@ def purge_expired_sessions(now: float | None = None) -> None:
                 del _MEMORY_SESSIONS[key]
 
 
-def load_session(session_id: str, load_files: bool = True) -> dict | None:
+def load_session(session_id: str, load_files: bool = True, kinds: set[str] | None = None) -> dict | None:
     if not session_id:
         return None
     store = get_store()
@@ -341,6 +341,8 @@ def load_session(session_id: str, load_files: bool = True) -> dict | None:
         files: dict[str, dict] = {}
         if load_files:
             for name, info in file_info.items():
+                if kinds and (info.get("kind") or "unknown") not in kinds:
+                    continue
                 size = int(info.get("size") or 0)
                 if is_vercel() and size > MAX_VERCEL_FILE_BYTES:
                     files[name] = {
@@ -366,7 +368,7 @@ def load_session(session_id: str, load_files: bool = True) -> dict | None:
             "admin": bool(meta.get("admin")),
             "updated": float(meta.get("updated") or time.time()),
             "_file_info": file_info,
-            "_files_loaded": load_files,
+            "_files_loaded": bool(load_files and not kinds),
         }
 
     with _lock:
