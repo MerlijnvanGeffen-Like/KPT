@@ -113,19 +113,23 @@ async function weekRangesFromServer() {
 }
 
 const SLIM_COLUMNS = [
-  ["Trx ID", ["trx id", "id"]],
-  ["Trx Date", ["trx date", "datum", "transaction date"]],
-  ["Trx Time", ["trx time", "tijd"]],
-  ["Truck PlateNr", ["truck platenr", "kenteken", "card platenr", "file platenr"]],
-  ["Trx Country", ["trx country", "land"]],
-  ["Distance KM", ["distance km", "km"]],
-  ["Total Amt (EUR)", ["total amt (eur)", "trx amt (eur)", "tol eur", "tol"]],
-  ["Billing Status", ["billing status"]],
-  ["Road Name", ["road name", "weg"]],
-  ["Entry Terminal", ["entry terminal"]],
-  ["Exit Terminal", ["exit terminal"]],
-  ["TISPL TSP", ["tispl tsp"]],
+  ["Trx ID", ["trxid"]],
+  ["Trx Date", ["trxdate", "datum"]],
+  ["Trx Time", ["trxtime", "tijd"]],
+  ["Truck PlateNr", ["truckplatenr", "kenteken", "cardplatenr", "fileplatenr"]],
+  ["Trx Country", ["trxcountry", "land"]],
+  ["Distance KM", ["distancekm"]],
+  ["Total Amt (EUR)", ["totalamteur", "trxamteur", "toleur"]],
+  ["Billing Status", ["billingstatus"]],
+  ["Road Name", ["roadname", "weg"]],
+  ["Entry Terminal", ["entryterminal"]],
+  ["Exit Terminal", ["exitterminal"]],
+  ["TISPL TSP", ["tispltsp"]],
 ];
+
+function compactHeader(name) {
+  return String(name || "").replace(/^\uFEFF/, "").replace(/["']/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
 
 function csvHeaderMeta(headerLine) {
   const raw = String(headerLine || "").replace(/^\uFEFF/, "");
@@ -135,9 +139,14 @@ function csvHeaderMeta(headerLine) {
     { delim: "\t", cols: raw.split("\t") },
   ].sort((left, right) => right.cols.length - left.cols.length);
   const { delim, cols } = candidates[0];
-  const names = cols.map((col) => String(col).replace(/["']/g, "").replace(/^\uFEFF/, "").trim().toLowerCase());
-  const idx = names.findIndex((name) => name === "trx date" || name.includes("trx date"));
-  const keep = SLIM_COLUMNS.map(([, aliases]) => names.findIndex((name) => aliases.some((alias) => name === alias || name.includes(alias))));
+  const names = cols.map(compactHeader);
+  const findCol = (aliases) => {
+    const exact = names.findIndex((name) => aliases.includes(name));
+    if (exact >= 0) return exact;
+    return names.findIndex((name) => aliases.some((alias) => alias.length >= 6 && name.includes(alias)));
+  };
+  const idx = findCol(["trxdate", "datum"]);
+  const keep = SLIM_COLUMNS.map(([, aliases]) => findCol(aliases));
   return { delim, idx, keep, outHeader: SLIM_COLUMNS.map(([label]) => label).join(";") };
 }
 

@@ -14,6 +14,7 @@ from kpt.core import (
     _resolve_plan,
     collapse_detail_summaries,
     dedupe_report_rows,
+    dmy_iso,
 )
 from maak_pdf_per_klant import make_pdf_bytes
 
@@ -39,6 +40,11 @@ def trx(**kwargs):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_dmy_iso_accepts_separators(self):
+        self.assertEqual(dmy_iso("22/09/2026"), "2026-09-22")
+        self.assertEqual(dmy_iso("22-09-2026"), "2026-09-22")
+        self.assertEqual(dmy_iso("2026-09-22"), "2026-09-22")
+        self.assertEqual(dmy_iso("22.09.2026 14:36:43"), "2026-09-22")
     def test_dedupe_prefers_billed_over_dont_bill(self):
         rows = dedupe_report_rows(
             [

@@ -283,11 +283,23 @@ def parse_excel_report(path: Path, data: bytes | None = None) -> list[dict]:
 
 
 def dmy_iso(dmy: str) -> str:
-    parts = (dmy or "").split("/")
+    raw = str(dmy or "").strip().strip("'\"")
+    if " " in raw:
+        raw = raw.split()[0]
+    parts = [part for part in re.split(r"[/\-.]", raw) if part]
     if len(parts) != 3:
         return ""
-    day, month, year = parts
-    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+    first, second, third = parts
+    if len(first) == 4:
+        year, month, day = first, second, third
+    else:
+        day, month, year = first, second, third
+        if len(year) == 2:
+            year = f"20{year}"
+    try:
+        return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
 
 
 def parse_report(name: str, invoice: str | None, uploaded: dict) -> list[dict]:
