@@ -73,7 +73,7 @@ async function readJson(response) {
     }
     if (response.status === 503 || response.status === 500) {
       throw new Error(
-        `Serverfout (${response.status}). Controleer Redis/Upstash op Vercel en of de laatste versie is gedeployed.`
+        `Serverfout (${response.status}). Vernieuw de pagina, klik Wissen en upload opnieuw. Blijft het stuk: Redis/Upstash op Vercel controleren.`
       );
     }
     throw new Error(

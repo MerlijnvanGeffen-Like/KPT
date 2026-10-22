@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request, send_from_directory
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from kpt import core, storage
 
@@ -52,14 +52,25 @@ def create_app() -> Flask:
         g.new_session_cookie = new_cookie
         g.session_dirty = request.method not in {"GET", "HEAD", "OPTIONS"}
 
+    @app.errorhandler(Exception)
+    def api_error(exc):
+        if isinstance(exc, HTTPException):
+            return exc
+        if not request.path.startswith("/api/"):
+            raise exc
+        message = str(exc) or "Onverwachte serverfout."
+        return jsonify({"error": message}), 500
+
     @app.after_request
     def finish_session(response: Response):
         if not hasattr(g, "session_id"):
             return response
-        if getattr(g, "session_dirty", True) or getattr(g, "new_session_cookie", False):
-            storage.save_session(g.session_id, g.session)
-        else:
-            storage.touch_session(g.session_id)
+        try:
+            if getattr(g, "session_dirty", True) or getattr(g, "new_session_cookie", False):
+                storage.save_session(g.session_id, g.session)
+        except Exception as exc:
+            if request.path.startswith("/api/") and response.status_code < 400:
+                return jsonify({"error": f"Sessie opslaan mislukt: {exc}"}), 500
         if getattr(g, "new_session_cookie", False):
             secure = request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
             response.set_cookie(
@@ -117,7 +128,7 @@ def create_app() -> Flask:
     def auth_status():
         try:
             users = storage.load_users()
-        except RuntimeError as exc:
+        except Exception as exc:
             return json_error(str(exc), 503)
         username = g.session.get("user") or ""
         record = users.get(username)

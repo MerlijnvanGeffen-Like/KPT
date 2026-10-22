@@ -391,10 +391,9 @@ def save_session(session_id: str, session: dict) -> None:
             meta["updated"] = session["updated"]
             store.set_bytes(
                 f"kpt:sess:{session_id}:meta",
-                json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+                json.dumps(meta, ensure_ascii=False, default=str).encode("utf-8"),
                 ex=SESSION_TTL,
             )
-            touch_session(session_id)
             return
         previous_raw = store.get_bytes(f"kpt:sess:{session_id}:meta")
         previous_info: dict = {}
@@ -422,7 +421,7 @@ def save_session(session_id: str, session: dict) -> None:
         }
         store.set_bytes(
             f"kpt:sess:{session_id}:meta",
-            json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+            json.dumps(meta, ensure_ascii=False, default=str).encode("utf-8"),
             ex=SESSION_TTL,
         )
         keep = set(meta["files"])

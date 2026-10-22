@@ -1399,6 +1399,18 @@ def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
     }
 
 
+def _json_ready(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, float) and (value != value or abs(value) == float("inf")):
+        return 0.0
+    return value
+
+
 def build_preview_cache(uploaded: dict) -> dict:
     """Lichte JSON voor Vercel GET /api/weeks en /api/pdf-customers."""
     weeks = list_weeks(uploaded)
@@ -1410,12 +1422,14 @@ def build_preview_cache(uploaded: dict) -> dict:
         for name, item in uploaded.items()
         if item.get("kind") == "planning"
     ]
-    return {
-        "weeks": weeks,
-        "pdf": pdf,
-        "planningFiles": sorted(planning),
-        "reports": list_report_files(uploaded),
-    }
+    return _json_ready(
+        {
+            "weeks": weeks,
+            "pdf": pdf,
+            "planningFiles": sorted(planning),
+            "reports": list_report_files(uploaded),
+        }
+    )
 
 
 def build_customer_pdf(week_id: str, customer: str, country: str, uploaded: dict) -> bytes:
