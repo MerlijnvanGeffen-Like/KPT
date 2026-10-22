@@ -112,6 +112,21 @@ async function weekRangesFromServer() {
     .map((week) => ({ from: String(week.from).slice(0, 10), to: String(week.to).slice(0, 10) }));
 }
 
+const SLIM_COLUMNS = [
+  ["Trx ID", ["trx id", "id"]],
+  ["Trx Date", ["trx date", "datum", "transaction date"]],
+  ["Trx Time", ["trx time", "tijd"]],
+  ["Truck PlateNr", ["truck platenr", "kenteken", "card platenr", "file platenr"]],
+  ["Trx Country", ["trx country", "land"]],
+  ["Distance KM", ["distance km", "km"]],
+  ["Total Amt (EUR)", ["total amt (eur)", "trx amt (eur)", "tol eur", "tol"]],
+  ["Billing Status", ["billing status"]],
+  ["Road Name", ["road name", "weg"]],
+  ["Entry Terminal", ["entry terminal"]],
+  ["Exit Terminal", ["exit terminal"]],
+  ["TISPL TSP", ["tispl tsp"]],
+];
+
 function csvHeaderMeta(headerLine) {
   const raw = String(headerLine || "").replace(/^\uFEFF/, "");
   const candidates = [
@@ -120,23 +135,19 @@ function csvHeaderMeta(headerLine) {
     { delim: "\t", cols: raw.split("\t") },
   ].sort((left, right) => right.cols.length - left.cols.length);
   const { delim, cols } = candidates[0];
-  const idx = cols.findIndex((col) => {
-    const name = String(col).replace(/["']/g, "").trim().toLowerCase();
-    return /trx\s*date/.test(name) || name === "datum" || name === "date" || name.includes("transaction date");
-  });
-  return { delim, idx };
+  const names = cols.map((col) => String(col).replace(/["']/g, "").replace(/^\uFEFF/, "").trim().toLowerCase());
+  const idx = names.findIndex((name) => name === "trx date" || name.includes("trx date"));
+  const keep = SLIM_COLUMNS.map(([, aliases]) => names.findIndex((name) => aliases.some((alias) => name === alias || name.includes(alias))));
+  return { delim, idx, keep, outHeader: SLIM_COLUMNS.map(([label]) => label).join(";") };
 }
 
 function rowDateIso(cols, dateIdx) {
-  if (dateIdx >= 0) {
-    const iso = csvDateToIso(cols[dateIdx] || "");
-    if (iso) return iso;
-  }
-  for (const cell of cols) {
-    const iso = csvDateToIso(cell);
-    if (iso) return iso;
-  }
-  return "";
+  if (dateIdx < 0) return "";
+  return csvDateToIso(cols[dateIdx] || "");
+}
+
+function slimRow(cols, keep) {
+  return keep.map((index) => (index >= 0 ? String(cols[index] ?? "").replace(/;/g, ",") : "")).join(";");
 }
 
 async function slimCsvToPlanning(file, ranges, onProgress) {
@@ -157,7 +168,7 @@ async function slimCsvToPlanning(file, ranges, onProgress) {
         if (!line.trim()) continue;
         header = line;
         meta = csvHeaderMeta(line);
-        lines.push(line);
+        lines.push(meta.outHeader);
         continue;
       }
       if (!line.trim()) continue;
@@ -166,7 +177,7 @@ async function slimCsvToPlanning(file, ranges, onProgress) {
       const iso = rowDateIso(cols, meta.idx);
       if (dateInRanges(iso, ranges)) {
         kept += 1;
-        lines.push(line);
+        lines.push(slimRow(cols, meta.keep));
       }
     }
   };
@@ -180,6 +191,9 @@ async function slimCsvToPlanning(file, ranges, onProgress) {
     if (onProgress) onProgress(total, kept);
   }
   if (!header) throw new Error("Dit CSV-bestand heeft geen kopregel.");
+  if (meta && meta.idx < 0) {
+    throw new Error("In dit CSV ontbreekt de kolom Trx Date. Gebruik het Telepass-tolrapport.");
+  }
   if (!kept) {
     throw new Error("In dit rapport staan geen tolregels in de datums van het rittenboek.");
   }
@@ -474,6 +488,11 @@ function renderCompanies() {
 
 async function postUpload(file, expectedKind, replace) {
   const prepared = await gzipFileIfHelpful(file);
+  if (onVercelHost() && prepared.blob.size > 4 * 1024 * 1024) {
+    throw new Error(
+      "De weekdata zijn na comprimeren nog te groot voor de website. Probeer één weekrittenboek tegelijk.",
+    );
+  }
   const body = new FormData();
   body.append("file", prepared.blob, file.name);
   if (prepared.compressed) body.append("compressed", "gzip");
@@ -500,11 +519,6 @@ async function prepareReportFile(file, ranges, index, total) {
     `${slim.kept.toLocaleString("nl-NL")} van ${slim.total.toLocaleString("nl-NL")} tolregels vallen in het rittenboek.`,
     "success",
   );
-  if (onVercelHost() && slim.file.size > 10 * 1024 * 1024) {
-    throw new Error(
-      "Na het filteren is het bestand nog te groot voor de website. Controleer of het rittenboek de juiste week is.",
-    );
-  }
   return slim.file;
 }
 

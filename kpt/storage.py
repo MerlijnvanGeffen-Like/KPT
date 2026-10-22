@@ -15,7 +15,7 @@ SESSION_TTL = int(os.environ.get("KPT_SESSION_TTL", str(2 * 60 * 60)))
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_SESSION_BYTES = 550 * 1024 * 1024
 # Op Vercel: geen hele Telepass-dumps in Redis; de browser stuurt alleen de week.
-MAX_VERCEL_FILE_BYTES = 12 * 1024 * 1024
+MAX_VERCEL_FILE_BYTES = 40 * 1024 * 1024
 _B64 = "b64:"
 # Upstash free/REST: houd encoded chunks onder ~750 KB.
 _REST_CHUNK_CHARS = 700_000
