@@ -126,6 +126,7 @@ const SLIM_COLUMNS = [
   ["Exit Terminal", ["exitterminal"]],
   ["TISPL TSP", ["tispltsp"]],
   ["Spec Page", ["specpage"]],
+  ["Prod Descr", ["proddescr", "product"]],
 ];
 
 function compactHeader(name) {

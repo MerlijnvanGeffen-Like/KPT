@@ -13,7 +13,7 @@ from kpt.core import (
     _correct_french_km,
     _fill_incomplete_french_km,
     _assign_plan,
-    _display_land,
+    _tunnel_label,
     _plan_index,
     _resolve_plan,
     collapse_detail_summaries,
@@ -37,6 +37,8 @@ def trx(**kwargs):
         "entry": "",
         "exit": "",
         "tsp": "",
+        "spec": "",
+        "product": "",
         "country": "DE",
         "billing": "Billed",
     }
@@ -45,6 +47,14 @@ def trx(**kwargs):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_tunnels_are_detected_without_becoming_a_country(self):
+        lief = trx(country="BE", spec="Liefkenshoektunnel", entry="05600000 - LHT", km=0, eur=17.6)
+        blank = trx(country="NL", spec="Blankenburg", product="Blankenburg", entry="RIGHT", km=0, eur=10.06)
+        road = trx(country="BE", spec="Belgian toll roads", entry="Flanders Region - A13", km=20, eur=5.96)
+        self.assertEqual(_tunnel_label(lief), "Liefkenshoektunnel")
+        self.assertEqual(_tunnel_label(blank), "Blankenburgtunnel")
+        self.assertEqual(_tunnel_label(road), "")
+
     def test_session_keeps_other_week_files(self):
         previous = {
             "Week 39-2026.xls": {"mtime": 1, "kind": "planning", "size": 10},
@@ -84,18 +94,6 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(sorted(names), ["week39.csv", "week40.csv"])
         self.assertEqual({row["plate"] for row in rows}, {"11AAA1", "22BBB2"})
         self.assertAlmostEqual(sum(row["eur"] for row in rows), 8.5)
-
-    def test_tunnels_get_own_land_label(self):
-        liefkens = trx(country="BE", tsp="LHT", entry="05600000 - LHT", spec="Liefkenshoektunnel", km=0, eur=17.6)
-        self.assertEqual(_display_land(liefkens), "Liefkenshoektunnel")
-        blankenburg = trx(country="NL", tsp="", entry="RIGHT", spec="Blankenburg", km=0, eur=10.06)
-        self.assertEqual(_display_land(blankenburg), "Blankenburgtunnel")
-        belgium = trx(country="BE", tsp="SOFICO", entry="SOFICO - A25", spec="Belgian toll roads", km=20, eur=5)
-        self.assertEqual(_display_land(belgium), "België")
-        westerschelde = trx(country="NL", tsp="", entry="", spec="Westerscheldetunnel", km=0, eur=12.5)
-        self.assertEqual(_display_land(westerschelde), "Westerscheldetunnel")
-        fee = trx(country="BE", tsp="", entry="Multi Service", spec="Liefkenshoektunnel", km=0, eur=0.02)
-        self.assertEqual(_display_land(fee), "België")
 
     def test_dmy_iso_accepts_separators(self):
         self.assertEqual(dmy_iso("22/09/2026"), "2026-09-22")
@@ -237,6 +235,33 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("Wekelijks_rapport_geheim.csv", text)
         self.assertNotIn("TISPL", text)
         self.assertNotIn("Telepass", text)
+        self.assertNotIn("Tunnel €", text)
+
+    def test_customer_pdf_puts_tunnel_on_same_row(self):
+        pdf = make_pdf_bytes(
+            "Van der Werff",
+            [
+                {
+                    "date": date(2026, 8, 14),
+                    "plate": "BB-317-Z",
+                    "ritnr": "1",
+                    "country": "België",
+                    "planKm": 400.0,
+                    "km": 120.0,
+                    "eur": 48.21,
+                    "tunnel": "Liefkenshoektunnel",
+                    "tunnelEur": 17.6,
+                }
+            ],
+            {"id": "Week 33-2026", "from": "2026-08-10", "to": "2026-08-15", "date": ""},
+            "rapport.csv",
+        )
+        text = "".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf)).pages)
+        self.assertIn("België", text)
+        self.assertIn("Liefkenshoek", text)
+        self.assertIn("Tunnel", text)
+        self.assertIn("17,60", text)
+        self.assertIn("48,21", text)
 
 
 if __name__ == "__main__":

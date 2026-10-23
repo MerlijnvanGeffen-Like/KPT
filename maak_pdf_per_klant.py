@@ -145,7 +145,8 @@ def make_pdf(
         Spacer(1, 6 * mm),
     ]
 
-    data = [[
+    show_tunnel = any(round(float(row.get("tunnelEur") or 0), 2) > 0 for row in rows)
+    headers = [
         Paragraph("Datum", header),
         Paragraph("Kenteken", header),
         Paragraph("Ritnummer", header),
@@ -153,7 +154,15 @@ def make_pdf(
         Paragraph("KM rit<br/><font size='6.5'>planning</font>", header),
         Paragraph("KM tol<br/><font size='6.5'>rapport</font>", header),
         Paragraph("Tol", header),
-    ]]
+    ]
+    if show_tunnel:
+        headers.extend(
+            [
+                Paragraph("Tunnel", header),
+                Paragraph("Tunnel €", header),
+            ]
+        )
+    data = [headers]
     total_plan_km = 0.0
     for row in rows:
         plan_km = float(row.get("planKm") or 0)
@@ -162,65 +171,78 @@ def make_pdf(
             km_tol = number(row.get("km") or 0)
         else:
             km_tol = "—"
-        data.append(
-            [
-                row["date"].strftime("%d-%m-%Y") if row.get("date") else "",
-                row.get("plate") or "",
-                Paragraph((row.get("ritnr") or "—").replace(" / ", "<br/>"), table_text),
-                row.get("country") or "—",
-                number(plan_km) if plan_km else "—",
-                km_tol,
-                euro(row.get("eur") or 0),
-            ]
-        )
+        line = [
+            row["date"].strftime("%d-%m-%Y") if row.get("date") else "",
+            row.get("plate") or "",
+            Paragraph((row.get("ritnr") or "—").replace(" / ", "<br/>"), table_text),
+            row.get("country") or "—",
+            number(plan_km) if plan_km else "—",
+            km_tol,
+            euro(row.get("eur") or 0),
+        ]
+        if show_tunnel:
+            tunnel_eur = float(row.get("tunnelEur") or 0)
+            line.extend(
+                [
+                    Paragraph(row.get("tunnel") or "—", table_text),
+                    euro(tunnel_eur) if tunnel_eur else "—",
+                ]
+            )
+        data.append(line)
 
     total_km = round(sum(row.get("km") or 0 for row in rows), 1)
     total_eur = round(sum(row.get("eur") or 0 for row in rows), 2)
-    data.append(["", "", "Totaal", "", number(round(total_plan_km, 1)), number(total_km), euro(total_eur)])
+    total_tunnel = round(sum(float(row.get("tunnelEur") or 0) for row in rows), 2)
+    footer = ["", "", "Totaal", "", number(round(total_plan_km, 1)), number(total_km), euro(total_eur)]
+    if show_tunnel:
+        footer.extend(["", euro(total_tunnel) if total_tunnel else "—"])
+    data.append(footer)
 
+    widths = [16 * mm, 21 * mm, 22 * mm, 16 * mm, 16 * mm, 16 * mm, 18 * mm]
+    if show_tunnel:
+        widths.extend([34 * mm, 19 * mm])
     table = Table(
         data,
-        colWidths=[22 * mm, 24 * mm, 30 * mm, 22 * mm, 23 * mm, 23 * mm, 24 * mm],
+        colWidths=widths,
         repeatRows=1,
         hAlign="LEFT",
     )
-    table.setStyle(
-        TableStyle(
-            [
-                ("FONTNAME", (0, 0), (-1, -1), FONT),
-                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
-                ("BACKGROUND", (0, 0), (-1, 0), BLUE),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), FONT),
-                ("ALIGN", (4, 1), (-1, -1), "RIGHT"),
-                ("GRID", (0, 0), (-1, -2), 0.35, colors.HexColor("#CBD5DC")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F6F8FA")]),
-                ("BACKGROUND", (0, -1), (-1, -1), LIGHT_BLUE),
-                ("LINEABOVE", (0, -1), (-1, -1), 1, BLUE),
-                ("FONTNAME", (0, -1), (-1, -1), FONT),
-                ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
+    style = [
+        ("FONTNAME", (0, 0), (-1, -1), FONT),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("BACKGROUND", (0, 0), (-1, 0), BLUE),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), FONT),
+        ("ALIGN", (4, 1), (6, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -2), 0.35, colors.HexColor("#CBD5DC")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F6F8FA")]),
+        ("BACKGROUND", (0, -1), (-1, -1), LIGHT_BLUE),
+        ("LINEABOVE", (0, -1), (-1, -1), 1, BLUE),
+        ("FONTNAME", (0, -1), (-1, -1), FONT),
+        ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    if show_tunnel:
+        style.append(("ALIGN", (8, 1), (8, -1), "RIGHT"))
+    table.setStyle(TableStyle(style))
+    guide = (
+        "Leeswijzer: <b>KM rit</b> is de planning per land. "
+        "<b>KM tol</b> is wat het tolrapport telt. "
+        "<b>Tol</b> is de wegentol."
     )
+    if show_tunnel:
+        guide += " <b>Tunnel</b> is welke tunnel, <b>Tunnel €</b> het tunnelbedrag; dat zit niet in de kolom Tol."
+    if any(row.get("kmFromPlan") for row in rows):
+        guide += (
+            " Bij Frankrijk ontbreken vaak kilometers in het tolrapport; "
+            "die vullen we aan uit het rittenboek. Het bedrag blijft uit het rapport."
+        )
     story.extend(
         [
             table,
             Spacer(1, 7 * mm),
-            Paragraph(
-                "Leeswijzer: <b>KM rit</b> is de planning per land. "
-                "<b>KM tol</b> is wat het tolrapport telt. "
-                "<b>Tol</b> is het bedrag. "
-                "Tunnels en bruggen met een eigen naam staan als aparte regel, niet in het land."
-                + (
-                    " Bij Frankrijk ontbreken vaak kilometers in het tolrapport; "
-                    "die vullen we aan uit het rittenboek. Het bedrag blijft uit het rapport."
-                    if any(row.get("kmFromPlan") for row in rows)
-                    else ""
-                ),
-                normal,
-            ),
+            Paragraph(guide, normal),
         ]
     )
     document.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)

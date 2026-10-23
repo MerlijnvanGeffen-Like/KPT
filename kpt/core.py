@@ -227,6 +227,7 @@ def report_row_from_map(row: dict) -> dict | None:
         "invId": pick(row, "Inv ID"),
         "invDate": pick(row, "Inv Date"),
         "spec": pick(row, "Spec Page"),
+        "product": pick(row, "Prod Descr", "Product"),
         "billing": pick(row, "Billing Status"),
     }
 
@@ -853,36 +854,42 @@ def normalize_country(value: str) -> str:
     return aliases.get(key, raw)
 
 
-def _generic_toll_spec(spec: str) -> bool:
-    key = (spec or "").strip().lower()
-    if not key:
-        return True
-    if key.startswith("multi service") or key in {"eurovignettes"}:
-        return True
-    return "toll roads" in key or "tispl" in key
+_TUNNEL_LABELS = (
+    ("liefkenshoek", "Liefkenshoektunnel"),
+    ("blankenburg", "Blankenburgtunnel"),
+    ("westerschelde", "Westerscheldetunnel"),
+    ("kennedytunnel", "Kennedytunnel"),
+    ("coentunnel", "Coentunnel"),
+    ("beneluxtunnel", "Beneluxtunnel"),
+    ("sluiskil", "Sluiskiltunnel"),
+    ("drechttunnel", "Drechttunnel"),
+    ("heinenoord", "Heinenoordtunnel"),
+    ("kiltunnel", "Kiltunnel"),
+    ("vlaardingen", "Vlaardingentunnel"),
+    ("wijkertunnel", "Wijkertunnel"),
+    ("zeeburgertunnel", "Zeeburgertunnel"),
+    ("noordzuid", "Noord/Zuid-Holland"),
+)
 
 
-def _tunnel_label(spec: str) -> str:
-    raw = " ".join((spec or "").split())
-    if raw.lower() == "blankenburg":
-        return "Blankenburgtunnel"
-    return raw
-
-
-def _display_land(transaction: dict) -> str:
-    """Benoemde tunnels/bruggen als eigen regel; land-tol blijft op het land."""
-    spec = (transaction.get("spec") or "").strip()
-    tsp = (transaction.get("tsp") or "").strip().upper()
-    entry = (transaction.get("entry") or "")
-    blob = f"{spec} {entry}".lower()
-    eur = float(transaction.get("eur") or 0)
-    if eur < 1:
-        return normalize_country(transaction.get("country") or "")
-    if tsp == "LHT" or "liefkenshoek" in blob or re.search(r"\blht\b", blob):
+def _tunnel_label(row: dict) -> str:
+    """Tunnels staan in Spec Page / product / LHT, niet als gewone wegkilometers."""
+    blob = " ".join(
+        str(row.get(key) or "")
+        for key in ("spec", "product", "road", "entry", "exit", "tsp")
+    )
+    compact = re.sub(r"[^a-z0-9]+", "", blob.lower())
+    if "lht" in compact:
         return "Liefkenshoektunnel"
-    if spec and not _generic_toll_spec(spec):
-        return _tunnel_label(spec)
-    return normalize_country(transaction.get("country") or "")
+    for needle, label in _TUNNEL_LABELS:
+        if needle in compact:
+            return label
+    if "tunnel" in compact:
+        for key in ("spec", "product", "road"):
+            raw = str(row.get(key) or "").strip()
+            if raw and "tunnel" in raw.lower():
+                return raw.split(";")[0].strip()
+    return ""
 
 
 def _split_amount(total: float, weights: list[float]) -> list[float]:
@@ -926,7 +933,6 @@ def _allocate_plan_km_by_country(rows: list[dict]) -> None:
             continue
         if len(group) == 1:
             continue
-
         unreliable = [row for row in group if (row.get("country") or "") == "Frankrijk"]
         reliable = [row for row in group if (row.get("country") or "") != "Frankrijk"]
         reliable_km = sum(float(row.get("km") or 0) for row in reliable)
@@ -1087,7 +1093,8 @@ def build_customer_pdf_rows(
                 unmatched_eur += transaction["eur"]
             continue
         matched_keys.add((iso_date, plate))
-        country = _display_land(transaction)
+        country = normalize_country(transaction.get("country") or "")
+        tunnel = _tunnel_label(transaction)
         customer = plan["customer"]
         key = (iso_date, plate, customer, country)
         item = grouped.setdefault(
@@ -1101,14 +1108,21 @@ def build_customer_pdf_rows(
                 "eur": 0.0,
                 "billedEur": 0.0,
                 "openEur": 0.0,
+                "tunnelEur": 0.0,
+                "tunnels": [],
                 "customer": customer,
                 "country": country,
                 "ritnr": plan.get("tripNumber") or "",
             },
         )
         item["ritten"] += 1
-        item["km"] += transaction["km"]
-        item["eur"] += transaction["eur"]
+        if tunnel:
+            item["tunnelEur"] += transaction["eur"]
+            if tunnel not in item["tunnels"]:
+                item["tunnels"].append(tunnel)
+        else:
+            item["km"] += transaction["km"]
+            item["eur"] += transaction["eur"]
         if _is_billed(transaction):
             item["billedEur"] += transaction["eur"]
         elif _is_dont_bill(transaction):
@@ -1122,7 +1136,9 @@ def build_customer_pdf_rows(
         item["eur"] = round(item["eur"], 2)
         item["billedEur"] = round(item["billedEur"], 2)
         item["openEur"] = round(item["openEur"], 2)
-        if item["eur"] <= 0:
+        item["tunnelEur"] = round(item.get("tunnelEur") or 0, 2)
+        item["tunnel"] = " + ".join(item.get("tunnels") or [])
+        if item["eur"] <= 0 and item["tunnelEur"] <= 0:
             continue
         billed_items.append(item)
     _allocate_plan_km_by_country(billed_items)
@@ -1460,7 +1476,7 @@ def list_pdf_customers(week_id: str, uploaded: dict) -> dict:
     meta, by_customer = build_customer_pdf_rows(week_id, uploaded)
     merged: dict[str, dict] = {}
     for customer, rows in by_customer.items():
-        eur = round(sum(row["eur"] for row in rows), 2)
+        eur = round(sum(row["eur"] + float(row.get("tunnelEur") or 0) for row in rows), 2)
         if eur <= 0:
             continue
         customer = canon_customer(customer)
@@ -1568,7 +1584,7 @@ def build_customer_zip(week_id: str | None, uploaded: dict) -> bytes:
             folder = pdf.safe_name(current["id"])
             source = ", ".join(current.get("reports") or []) or "rittenboek"
             for customer, rows in sorted(by_customer.items(), key=lambda item: item[0].lower()):
-                if round(sum(row["eur"] for row in rows), 2) <= 0:
+                if round(sum(row["eur"] + float(row.get("tunnelEur") or 0) for row in rows), 2) <= 0:
                     continue
                 filename = f"Toloverzicht - {pdf.safe_name(current['id'])} - {pdf.safe_name(customer)}.pdf"
                 archive.writestr(
