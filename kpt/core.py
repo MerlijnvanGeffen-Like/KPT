@@ -979,21 +979,12 @@ def _resolve_plan(
     week_from: str,
     week_to: str,
 ) -> tuple[dict | None, bool]:
-    """Eerst exacte dag+kenteken, anders dezelfde auto elders in deze week (lege km / extra dag)."""
+    """Alleen exacte dag + kenteken. Geen rit die dag: geen klant."""
+    del plan_by_plate, week_from, week_to
     exact = plan_map.get((iso_date, plate))
     if exact:
         return exact, True
-    if not iso_date or not (week_from <= iso_date <= week_to):
-        return None, False
-    candidates = plan_by_plate.get(plate) or []
-    if not candidates:
-        return None, False
-    target = datetime.strptime(iso_date, "%Y-%m-%d").date()
-    closest = min(
-        candidates,
-        key=lambda row: abs((datetime.strptime(row["date"], "%Y-%m-%d").date() - target).days),
-    )
-    return closest, False
+    return None, False
 
 
 def _iso_week_label(iso_date: str) -> str:
@@ -1006,16 +997,9 @@ def _iso_week_label(iso_date: str) -> str:
 
 
 def _plan_index(plan_rows: list[dict]) -> dict:
-    """Index over alle weekbestanden samen, zodat een tolregel maar één week krijgt."""
+    """Index over alle weekbestanden: alleen dag + kenteken, één week per rit."""
     exact: dict[tuple[str, str], dict] = {}
-    by_week_plate: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    bounds: dict[str, dict] = {}
     for row in plan_rows:
-        week = row["week"]
-        item = bounds.setdefault(week, {"from": row["date"], "to": row["date"]})
-        item["from"] = min(item["from"], row["date"])
-        item["to"] = max(item["to"], row["date"])
-        by_week_plate[(week, row["plate"])].append(row)
         key = (row["date"], row["plate"])
         current = exact.get(key)
         if current is None:
@@ -1026,38 +1010,15 @@ def _plan_index(plan_rows: list[dict]) -> dict:
             exact[key] = row
         elif current["week"] != iso_label and row["week"] < current["week"]:
             exact[key] = row
-    return {"exact": exact, "by_week_plate": by_week_plate, "bounds": bounds}
+    return {"exact": exact}
 
 
 def _assign_plan(iso_date: str, plate: str, index: dict) -> tuple[dict | None, bool]:
-    """Eén rit, één week: exacte dag wint; anders de dichtstbijzijnde rit in precies één week."""
+    """Tol alleen als dat kenteken die dag in het rittenboek staat."""
     exact = (index.get("exact") or {}).get((iso_date, plate))
     if exact:
         return exact, True
-    if not iso_date:
-        return None, False
-    try:
-        target = datetime.strptime(iso_date, "%Y-%m-%d").date()
-    except ValueError:
-        return None, False
-    best: dict | None = None
-    best_key = None
-    for week, bounds in (index.get("bounds") or {}).items():
-        if not (bounds["from"] <= iso_date <= bounds["to"]):
-            continue
-        rows = (index.get("by_week_plate") or {}).get((week, plate)) or []
-        if not rows:
-            continue
-        closest = min(
-            rows,
-            key=lambda row: abs((datetime.strptime(row["date"], "%Y-%m-%d").date() - target).days),
-        )
-        delta = abs((datetime.strptime(closest["date"], "%Y-%m-%d").date() - target).days)
-        key = (delta, week)
-        if best_key is None or key < best_key:
-            best_key = key
-            best = closest
-    return best, False
+    return None, False
 
 
 def build_customer_pdf_rows(

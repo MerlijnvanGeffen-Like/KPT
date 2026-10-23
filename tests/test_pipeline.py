@@ -170,32 +170,31 @@ class PipelineTests(unittest.TestCase):
         plan37, exact37 = _assign_plan("2026-09-07", "X", index)
         self.assertTrue(exact37)
         self.assertEqual(plan37["week"], "Week 37-2026")
-        nearest, nearest_exact = _assign_plan("2026-09-05", "X", index)
-        self.assertFalse(nearest_exact)
-        self.assertEqual(nearest["week"], "Week 36-2026")
-        self.assertIs(_assign_plan("2026-09-05", "X", index)[0], nearest)
+        missing, missing_exact = _assign_plan("2026-09-05", "X", index)
+        self.assertIsNone(missing)
+        self.assertFalse(missing_exact)
 
-    def test_same_plate_other_day_in_week_still_matches(self):
-        plan = {"date": "2026-09-21", "plate": "46BNT5", "customer": "Raben", "km": 181, "tripNumber": "677664"}
+    def test_plate_on_another_day_is_not_billed(self):
+        plan = {"date": "2026-09-28", "plate": "53BTK5", "customer": "Verhoeven", "km": 400, "tripNumber": "1"}
         found, exact = _resolve_plan(
-            "2026-09-22",
-            "46BNT5",
-            {("2026-09-21", "46BNT5"): plan},
-            {"46BNT5": [plan]},
-            "2026-09-21",
-            "2026-09-26",
+            "2026-09-28",
+            "53BTK5",
+            {("2026-09-28", "53BTK5"): plan},
+            {"53BTK5": [plan]},
+            "2026-09-28",
+            "2026-10-03",
         )
         self.assertIs(found, plan)
-        self.assertFalse(exact)
-        missing, _ = _resolve_plan(
-            "2026-09-22",
-            "21BSZ2",
-            {("2026-09-21", "46BNT5"): plan},
-            {"46BNT5": [plan]},
-            "2026-09-21",
-            "2026-09-26",
+        self.assertTrue(exact)
+        dealer, _ = _resolve_plan(
+            "2026-09-28",
+            "53BTK5",
+            {("2026-09-29", "53BTK5"): plan},
+            {"53BTK5": [plan]},
+            "2026-09-28",
+            "2026-10-03",
         )
-        self.assertIsNone(missing)
+        self.assertIsNone(dealer)
 
     def test_incomplete_french_km_filled_from_rittenboek(self):
         rows = [
