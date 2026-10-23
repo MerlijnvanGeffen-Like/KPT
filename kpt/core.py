@@ -853,6 +853,38 @@ def normalize_country(value: str) -> str:
     return aliases.get(key, raw)
 
 
+def _generic_toll_spec(spec: str) -> bool:
+    key = (spec or "").strip().lower()
+    if not key:
+        return True
+    if key.startswith("multi service") or key in {"eurovignettes"}:
+        return True
+    return "toll roads" in key or "tispl" in key
+
+
+def _tunnel_label(spec: str) -> str:
+    raw = " ".join((spec or "").split())
+    if raw.lower() == "blankenburg":
+        return "Blankenburgtunnel"
+    return raw
+
+
+def _display_land(transaction: dict) -> str:
+    """Benoemde tunnels/bruggen als eigen regel; land-tol blijft op het land."""
+    spec = (transaction.get("spec") or "").strip()
+    tsp = (transaction.get("tsp") or "").strip().upper()
+    entry = (transaction.get("entry") or "")
+    blob = f"{spec} {entry}".lower()
+    eur = float(transaction.get("eur") or 0)
+    if eur < 1:
+        return normalize_country(transaction.get("country") or "")
+    if tsp == "LHT" or "liefkenshoek" in blob or re.search(r"\blht\b", blob):
+        return "Liefkenshoektunnel"
+    if spec and not _generic_toll_spec(spec):
+        return _tunnel_label(spec)
+    return normalize_country(transaction.get("country") or "")
+
+
 def _split_amount(total: float, weights: list[float]) -> list[float]:
     """Verdeel total over weights; laatste regel vangt afronding."""
     if not weights:
@@ -1055,7 +1087,7 @@ def build_customer_pdf_rows(
                 unmatched_eur += transaction["eur"]
             continue
         matched_keys.add((iso_date, plate))
-        country = normalize_country(transaction.get("country") or "")
+        country = _display_land(transaction)
         customer = plan["customer"]
         key = (iso_date, plate, customer, country)
         item = grouped.setdefault(

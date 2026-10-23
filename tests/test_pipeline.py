@@ -13,6 +13,7 @@ from kpt.core import (
     _correct_french_km,
     _fill_incomplete_french_km,
     _assign_plan,
+    _display_land,
     _plan_index,
     _resolve_plan,
     collapse_detail_summaries,
@@ -83,6 +84,18 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(sorted(names), ["week39.csv", "week40.csv"])
         self.assertEqual({row["plate"] for row in rows}, {"11AAA1", "22BBB2"})
         self.assertAlmostEqual(sum(row["eur"] for row in rows), 8.5)
+
+    def test_tunnels_get_own_land_label(self):
+        liefkens = trx(country="BE", tsp="LHT", entry="05600000 - LHT", spec="Liefkenshoektunnel", km=0, eur=17.6)
+        self.assertEqual(_display_land(liefkens), "Liefkenshoektunnel")
+        blankenburg = trx(country="NL", tsp="", entry="RIGHT", spec="Blankenburg", km=0, eur=10.06)
+        self.assertEqual(_display_land(blankenburg), "Blankenburgtunnel")
+        belgium = trx(country="BE", tsp="SOFICO", entry="SOFICO - A25", spec="Belgian toll roads", km=20, eur=5)
+        self.assertEqual(_display_land(belgium), "België")
+        westerschelde = trx(country="NL", tsp="", entry="", spec="Westerscheldetunnel", km=0, eur=12.5)
+        self.assertEqual(_display_land(westerschelde), "Westerscheldetunnel")
+        fee = trx(country="BE", tsp="", entry="Multi Service", spec="Liefkenshoektunnel", km=0, eur=0.02)
+        self.assertEqual(_display_land(fee), "België")
 
     def test_dmy_iso_accepts_separators(self):
         self.assertEqual(dmy_iso("22/09/2026"), "2026-09-22")

@@ -211,7 +211,8 @@ def make_pdf(
             Paragraph(
                 "Leeswijzer: <b>KM rit</b> is de planning per land. "
                 "<b>KM tol</b> is wat het tolrapport telt. "
-                "<b>Tol</b> is het bedrag."
+                "<b>Tol</b> is het bedrag. "
+                "Tunnels en bruggen met een eigen naam staan als aparte regel, niet in het land."
                 + (
                     " Bij Frankrijk ontbreken vaak kilometers in het tolrapport; "
                     "die vullen we aan uit het rittenboek. Het bedrag blijft uit het rapport."
