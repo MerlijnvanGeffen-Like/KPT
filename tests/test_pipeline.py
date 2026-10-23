@@ -137,20 +137,23 @@ class PipelineTests(unittest.TestCase):
         summary = trx(id="sum", time="10:09:00", entry="123456", km=60, eur=12)
         foreign = trx(id="at", time="10:10:00", entry="ASFINAG", km=320, eur=80, country="DE")
         sanef = trx(id="fr", time="11:00:00", entry="SANEF - PONT STE MAXENCE", km=40, eur=171.85, country="DE")
-        kept = collapse_detail_summaries(gantries + [summary, foreign, sanef])
+        spain = trx(id="es", time="11:10:00", entry="IBERPISTAS - MIRANDA", km=20, eur=40, country="DE")
+        portugal = trx(id="pt", time="11:20:00", entry="BRISA - CAMPO", km=20, eur=30, country="PT")
+        kept = collapse_detail_summaries(gantries + [summary, foreign, sanef, spain, portugal])
         ids = {row["id"] for row in kept}
         self.assertTrue({"0", "1", "2", "3", "4", "5"} <= ids)
         self.assertNotIn("sum", ids)
+        self.assertNotIn("es", ids)
+        self.assertNotIn("pt", ids)
         self.assertIn("at", ids)
         self.assertIn("fr", ids)
         by_id = {row["id"]: row for row in kept}
-        self.assertEqual(by_id["at"]["country"], "AT")
-        self.assertEqual(by_id["fr"]["country"], "FR")
-        self.assertAlmostEqual(sum(row["eur"] for row in kept if row["country"] == "DE"), 12.0)
-        self.assertAlmostEqual(sum(row["eur"] for row in kept), 12.0 + 80 + 171.85)
+        self.assertEqual(by_id["at"]["country"], "DE")
+        self.assertEqual(by_id["fr"]["country"], "DE")
+        self.assertAlmostEqual(sum(row["eur"] for row in kept if row["country"] == "DE"), 12.0 + 80 + 171.85)
 
-    def test_french_km_decimal_shift(self):
-        self.assertEqual(_correct_french_km(12.45, 18.83, "FR"), 124.5)
+    def test_report_km_is_not_rewritten(self):
+        self.assertEqual(_correct_french_km(12.45, 18.83, "FR"), 12.45)
         self.assertEqual(_correct_french_km(124.5, 18.83, "FR"), 124.5)
 
     def test_plan_km_is_per_country_not_trip_total(self):
@@ -242,6 +245,7 @@ class PipelineTests(unittest.TestCase):
                     "date": date(2026, 9, 23),
                     "plate": "00-ABC-1",
                     "ritnr": "12",
+                    "weg": "Perwez",
                     "country": "Frankrijk",
                     "planKm": 700.0,
                     "km": 700.0,
@@ -255,6 +259,7 @@ class PipelineTests(unittest.TestCase):
         text = "".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf)).pages)
         self.assertIn("Leeswijzer", text)
         self.assertIn("KM rit", text)
+        self.assertIn("Perwez", text)
         self.assertIn("planning", text.lower())
         self.assertIn("rittenboek", text.lower())
         self.assertNotIn("Don't Bill", text)

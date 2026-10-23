@@ -233,18 +233,9 @@ def report_row_from_map(row: dict) -> dict | None:
 
 
 def _correct_french_km(km: float, eur: float, country: str) -> float:
-    """Telepass zet Franse TISPL-km een decimaal te weinig (12,45 i.p.v. 124,5)."""
-    if km <= 0 or eur <= 0:
-        return km
-    code = re.sub(r"[^A-Z]", "", (country or "").upper())
-    if code not in {"FR", "FRA", "FRANKRIJK", "FRANCE"}:
-        return km
-    if eur / km <= 1.2:
-        return km
-    fixed = round(km * 10, 3)
-    if eur / fixed > 2.5:
-        return km
-    return fixed
+    """Kilometer blijft wat het rapport zegt. Geen correctie op basis van een aanname."""
+    del eur, country
+    return km
 
 
 def parse_csv_report(path: Path, data: bytes | None = None) -> list[dict]:
@@ -619,88 +610,43 @@ def _is_germany(row: dict) -> bool:
     return _report_country_code(row) == "DE"
 
 
-_FOREIGN_TOLL = (
-    "SANEF",
-    "APRR",
-    "COFIROUTE",
-    "ALIS",
-    "ASF",
-    "AREA",
-    "ESCOTA",
-    "IBERPISTAS",
-    "ALFAJARIN",
-    "ASFINAG",
-    "BRISA",
-    "CONCESSAO",
-    "AUTOSTRADE",
-    "DARS",
-    "VINCI",
-    "MONTAUBAN",
-    "CHESNES",
-    "RIVES",
-    "VALONGO",
-    "INZERSDORF",
-)
+# Geen ritten naar Spanje of Portugal. Die Telepass-regels niet verrekenen.
+_UNBILLED_OPERATORS = ("IBERPISTAS", "ALFAJARIN", "BRISA", "CONCESSAO", "VALONGO")
 
 
-_OPERATOR_COUNTRY = (
-    ("SANEF", "FR"),
-    ("APRR", "FR"),
-    ("COFIROUTE", "FR"),
-    ("ALIS", "FR"),
-    ("ESCOTA", "FR"),
-    ("ASF", "FR"),
-    ("AREA", "FR"),
-    ("VINCI", "FR"),
-    ("MONTAUBAN", "FR"),
-    ("CHESNES", "FR"),
-    ("RIVES", "FR"),
-    ("ASFINAG", "AT"),
-    ("INZERSDORF", "AT"),
-    ("IBERPISTAS", "ES"),
-    ("ALFAJARIN", "ES"),
-    ("BRISA", "PT"),
-    ("CONCESSAO", "PT"),
-    ("VALONGO", "PT"),
-    ("AUTOSTRADE", "IT"),
-    ("DARS", "SI"),
-)
-
-
-def _reclassify_foreign_toll(row: dict) -> None:
-    """Telepass zet Franse/Spaanse/Oostenrijkse tol vaak op land DE. Dat is wel echt tol."""
-    blob = " ".join(
+def _toll_blob(row: dict) -> str:
+    return " ".join(
         str(row.get(key) or "")
-        for key in ("entry", "exit", "road", "tsp", "spec", "product")
+        for key in ("entry", "exit", "road", "tsp", "spec", "product", "country")
     ).upper()
-    for tag, code in sorted(_OPERATOR_COUNTRY, key=lambda item: -len(item[0])):
-        if tag in blob:
-            row["country"] = code
-            if code == "FR":
-                row["km"] = _correct_french_km(float(row.get("km") or 0), float(row.get("eur") or 0), code)
-            return
+
+
+def _is_unbilled_toll(row: dict) -> bool:
+    if _report_country_code(row) in {"ES", "PT"}:
+        return True
+    blob = _toll_blob(row)
+    return any(tag in blob for tag in _UNBILLED_OPERATORS)
 
 
 def _is_bundle_row(row: dict) -> bool:
+    """Alleen een cijfermatige Duitse somregel, niet een andere weg met een naam."""
     entry = (row.get("entry") or "").strip()
     km = float(row.get("km") or 0)
-    if entry and re.fullmatch(r"[\d\s-]+", entry) and km >= 8:
-        return True
-    blob = f"{entry} {row.get('exit') or ''} {row.get('road') or ''} {row.get('tsp') or ''}".upper()
-    if any(tag in blob for tag in _FOREIGN_TOLL):
-        return True
-    return (not _is_gantry_row(row)) and km >= 10
+    return bool(entry and re.fullmatch(r"[\d\s-]+", entry) and km >= 8)
 
 
 def collapse_detail_summaries(rows: list[dict]) -> list[dict]:
     """Duitse tol staat vaak als deeltrajecten én als somregel; tel de som niet dubbel."""
-    for row in rows:
-        _reclassify_foreign_toll(row)
+    drop: set[int] = set()
+    for index, row in enumerate(rows):
+        if _is_unbilled_toll(row):
+            drop.add(index)
     groups: dict[tuple[str, str, str], list[int]] = defaultdict(list)
     for index, row in enumerate(rows):
+        if index in drop:
+            continue
         key = (row.get("date") or "", row.get("plate") or "", _report_country_code(row))
         groups[key].append(index)
-    drop: set[int] = set()
     for indexes in groups.values():
         if not _is_germany(rows[indexes[0]]):
             continue
@@ -1117,6 +1063,7 @@ def build_customer_pdf_rows(
                 "customer": customer,
                 "country": country,
                 "ritnr": plan.get("tripNumber") or "",
+                "weg": plan.get("desc") or "",
             },
         )
         item["ritten"] += 1
@@ -1145,8 +1092,6 @@ def build_customer_pdf_rows(
         if item["eur"] <= 0 and item["tunnelEur"] <= 0:
             continue
         billed_items.append(item)
-    _allocate_plan_km_by_country(billed_items)
-    _fill_incomplete_french_km(billed_items)
 
     by_customer: dict[str, list[dict]] = defaultdict(list)
     for item in billed_items:
