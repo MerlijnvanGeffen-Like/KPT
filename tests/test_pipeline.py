@@ -17,9 +17,11 @@ from kpt.core import (
     _tunnel_label,
     _plan_index,
     _resolve_plan,
+    build_customer_pdf,
     collapse_detail_summaries,
     dedupe_report_rows,
     dmy_iso,
+    list_pdf_customers,
     parse_all_reports,
 )
 from maak_pdf_per_klant import make_pdf_bytes
@@ -151,6 +153,49 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(by_id["at"]["country"], "DE")
         self.assertEqual(by_id["fr"]["country"], "DE")
         self.assertAlmostEqual(sum(row["eur"] for row in kept if row["country"] == "DE"), 12.0 + 80 + 171.85)
+
+    def test_french_toll_is_billed_to_the_customer(self):
+        import openpyxl
+
+        workbook = openpyxl.Workbook()
+        first = workbook.active
+        first.title = "21-09-2026"
+        second = workbook.create_sheet("22-09-2026")
+        for sheet, desc in (
+            (first, "Moerdijk GuillerVille"),
+            (second, "Guiller Ville Ploermel"),
+        ):
+            sheet.append(["Klant", "Auto", "Rit", "Omschrijving", "", "Km", "Kenteken"])
+            sheet.append(["ETC", "1", "12", desc, "", 610, "42-BXP-8"])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        header = (
+            "Trx ID;Trx Date;Truck PlateNr;Trx Country;Distance KM;Total Amt (EUR);"
+            "Billing Status;Entry Terminal;Spec Page"
+        )
+        report = "\n".join(
+            [
+                header,
+                "1;21/09/2026;42-BXP-8;NL;127.5;19.89;Billed;Telepass Netherlands;Dutch toll roads",
+                "2;21/09/2026;42-BXP-8;FR;17.5;51.90;Billed;SANEF - DOURGES;French toll roads - TISPL",
+                "3;22/09/2026;42-BXP-8;FR;12.7;59.72;Billed;SAPN - COTTEVRARD;French toll roads - TISPL",
+                "4;23/09/2026;42-BXP-8;FR;34.3;188.30;Billed;ALIS - A28;French toll roads - TISPL",
+            ]
+        )
+        uploaded = {
+            "Week 39-2026.xlsx": {"data": buffer.getvalue(), "mtime": 1, "kind": "planning"},
+            "report.csv": {"data": report.encode(), "mtime": 2, "kind": "report"},
+        }
+        customers = list_pdf_customers("Week 39-2026", uploaded)
+        etc = next(item for item in customers["customers"] if item["customer"] == "ETC")
+        self.assertIn("Frankrijk", etc["countries"])
+        self.assertAlmostEqual(etc["eur"], 19.89 + 51.90 + 59.72)
+        pdf = build_customer_pdf("Week 39-2026", "ETC", "", uploaded)
+        text = "".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf)).pages)
+        self.assertIn("Frankrijk", text)
+        self.assertIn("51,90", text)
+        self.assertIn("59,72", text)
+        self.assertNotIn("188,30", text)
 
     def test_report_km_is_not_rewritten(self):
         self.assertEqual(_correct_french_km(12.45, 18.83, "FR"), 12.45)

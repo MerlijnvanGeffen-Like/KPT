@@ -621,7 +621,17 @@ def _toll_blob(row: dict) -> str:
     ).upper()
 
 
+def _is_french_toll(row: dict) -> bool:
+    """Het rapport noemt dit zelf Frankrijk. Die regel wordt nooit weggegooid."""
+    if _report_country_code(row) == "FR":
+        return True
+    blob = _toll_blob(row)
+    return "FRENCH TOLL" in blob or "FRANKRIJK" in blob
+
+
 def _is_unbilled_toll(row: dict) -> bool:
+    if _is_french_toll(row):
+        return False
     if _report_country_code(row) in {"ES", "PT"}:
         return True
     blob = _toll_blob(row)
@@ -697,7 +707,7 @@ def collapse_detail_summaries(rows: list[dict]) -> list[dict]:
                     local_drop.update(matched)
                     break
         drop.update(local_drop)
-    return [row for i, row in enumerate(rows) if i not in drop]
+    return [row for i, row in enumerate(rows) if i not in drop or _is_french_toll(row)]
 
 
 def dedupe_report_rows(rows: list[dict]) -> list[dict]:
