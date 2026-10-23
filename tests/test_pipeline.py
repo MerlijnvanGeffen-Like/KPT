@@ -7,6 +7,7 @@ from io import BytesIO
 
 from pypdf import PdfReader
 
+from kpt import storage
 from kpt.storage import merge_file_catalog
 from kpt.core import (
     _allocate_plan_km_by_country,
@@ -51,9 +52,26 @@ class PipelineTests(unittest.TestCase):
         lief = trx(country="BE", spec="Liefkenshoektunnel", entry="05600000 - LHT", km=0, eur=17.6)
         blank = trx(country="NL", spec="Blankenburg", product="Blankenburg", entry="RIGHT", km=0, eur=10.06)
         road = trx(country="BE", spec="Belgian toll roads", entry="Flanders Region - A13", km=20, eur=5.96)
-        self.assertEqual(_tunnel_label(lief), "Liefkenshoektunnel")
-        self.assertEqual(_tunnel_label(blank), "Blankenburgtunnel")
+        self.assertEqual(_tunnel_label(lief), "Liefkenshoek")
+        self.assertEqual(_tunnel_label(blank), "Blankenburg")
         self.assertEqual(_tunnel_label(road), "")
+
+    def test_local_login_session_is_remembered(self):
+        session_id = "test-local-login"
+        storage._MEMORY_SESSIONS.pop(session_id, None)
+        original = storage.get_store
+        storage.get_store = lambda: None
+        try:
+            storage.save_session(
+                session_id,
+                {"files": {}, "state": {}, "user": "beheer", "admin": True},
+            )
+            loaded = storage.load_session(session_id)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["user"], "beheer")
+        finally:
+            storage.get_store = original
+            storage._MEMORY_SESSIONS.pop(session_id, None)
 
     def test_session_keeps_other_week_files(self):
         previous = {
@@ -118,12 +136,18 @@ class PipelineTests(unittest.TestCase):
         ]
         summary = trx(id="sum", time="10:09:00", entry="123456", km=60, eur=12)
         foreign = trx(id="at", time="10:10:00", entry="ASFINAG", km=320, eur=80, country="DE")
-        kept = collapse_detail_summaries(gantries + [summary, foreign])
+        sanef = trx(id="fr", time="11:00:00", entry="SANEF - PONT STE MAXENCE", km=40, eur=171.85, country="DE")
+        kept = collapse_detail_summaries(gantries + [summary, foreign, sanef])
         ids = {row["id"] for row in kept}
         self.assertTrue({"0", "1", "2", "3", "4", "5"} <= ids)
         self.assertNotIn("sum", ids)
-        self.assertNotIn("at", ids)
-        self.assertAlmostEqual(sum(row["eur"] for row in kept), 12.0)
+        self.assertIn("at", ids)
+        self.assertIn("fr", ids)
+        by_id = {row["id"]: row for row in kept}
+        self.assertEqual(by_id["at"]["country"], "AT")
+        self.assertEqual(by_id["fr"]["country"], "FR")
+        self.assertAlmostEqual(sum(row["eur"] for row in kept if row["country"] == "DE"), 12.0)
+        self.assertAlmostEqual(sum(row["eur"] for row in kept), 12.0 + 80 + 171.85)
 
     def test_french_km_decimal_shift(self):
         self.assertEqual(_correct_french_km(12.45, 18.83, "FR"), 124.5)
@@ -205,6 +229,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["km"], 700.0)
         self.assertEqual(rows[0]["kmReport"], 343.2)
         self.assertEqual(rows[0]["eur"], 188.3)
+        partial = [{"country": "Frankrijk", "planKm": 313.1, "km": 175.4, "eur": 51.9}]
+        _fill_incomplete_french_km(partial)
+        self.assertEqual(partial[0]["km"], 313.1)
+        self.assertEqual(partial[0]["eur"], 51.9)
 
     def test_customer_pdf_has_read_guide_not_internal_notes(self):
         pdf = make_pdf_bytes(
@@ -248,7 +276,7 @@ class PipelineTests(unittest.TestCase):
                     "planKm": 400.0,
                     "km": 120.0,
                     "eur": 48.21,
-                    "tunnel": "Liefkenshoektunnel",
+                    "tunnel": "Liefkenshoek",
                     "tunnelEur": 17.6,
                 }
             ],

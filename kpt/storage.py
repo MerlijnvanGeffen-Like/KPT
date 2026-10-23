@@ -484,6 +484,9 @@ def save_session(session_id: str, session: dict) -> None:
             store.delete(*(f"kpt:sess:{session_id}:file:{name}" for name in removed))
         return
 
+    with _lock:
+        _MEMORY_SESSIONS[session_id] = session
+
 
 def touch_session(session_id: str) -> None:
     """Verleng TTL zonder grote bestanden opnieuw te schrijven."""

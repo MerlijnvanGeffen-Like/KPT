@@ -200,7 +200,7 @@ def make_pdf(
 
     widths = [16 * mm, 21 * mm, 22 * mm, 16 * mm, 16 * mm, 16 * mm, 18 * mm]
     if show_tunnel:
-        widths.extend([34 * mm, 19 * mm])
+        widths.extend([28 * mm, 19 * mm])
     table = Table(
         data,
         colWidths=widths,
@@ -232,7 +232,7 @@ def make_pdf(
         "<b>Tol</b> is de wegentol."
     )
     if show_tunnel:
-        guide += " <b>Tunnel</b> is welke tunnel, <b>Tunnel €</b> het tunnelbedrag; dat zit niet in de kolom Tol."
+        guide += " <b>Tunnel €</b> hoort bij de tunnel in die kolom en zit niet in Tol."
     if any(row.get("kmFromPlan") for row in rows):
         guide += (
             " Bij Frankrijk ontbreken vaak kilometers in het tolrapport; "

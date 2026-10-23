@@ -71,6 +71,13 @@ async function readJson(response) {
         "Upload is te groot voor de website. Upload eerst het rittenboek; van een groot CSV sturen we alleen die week."
       );
     }
+    if (response.status === 401 && !/\/api\/auth\/(login|setup)/.test(response.url || "")) {
+      authState = { setupRequired: false, authenticated: false, username: "", admin: false };
+      showAuthentication();
+      els.authError.textContent = "Log eerst in. De vorige sessie was verlopen.";
+      els.authError.hidden = false;
+      throw new Error("Log eerst in.");
+    }
     if (response.status === 503 || response.status === 500) {
       throw new Error(
         `Serverfout (${response.status}). Vernieuw de pagina, klik Wissen en upload opnieuw. Blijft het stuk: Redis/Upstash op Vercel controleren.`

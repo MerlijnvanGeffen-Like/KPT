@@ -643,6 +643,44 @@ _FOREIGN_TOLL = (
 )
 
 
+_OPERATOR_COUNTRY = (
+    ("SANEF", "FR"),
+    ("APRR", "FR"),
+    ("COFIROUTE", "FR"),
+    ("ALIS", "FR"),
+    ("ESCOTA", "FR"),
+    ("ASF", "FR"),
+    ("AREA", "FR"),
+    ("VINCI", "FR"),
+    ("MONTAUBAN", "FR"),
+    ("CHESNES", "FR"),
+    ("RIVES", "FR"),
+    ("ASFINAG", "AT"),
+    ("INZERSDORF", "AT"),
+    ("IBERPISTAS", "ES"),
+    ("ALFAJARIN", "ES"),
+    ("BRISA", "PT"),
+    ("CONCESSAO", "PT"),
+    ("VALONGO", "PT"),
+    ("AUTOSTRADE", "IT"),
+    ("DARS", "SI"),
+)
+
+
+def _reclassify_foreign_toll(row: dict) -> None:
+    """Telepass zet Franse/Spaanse/Oostenrijkse tol vaak op land DE. Dat is wel echt tol."""
+    blob = " ".join(
+        str(row.get(key) or "")
+        for key in ("entry", "exit", "road", "tsp", "spec", "product")
+    ).upper()
+    for tag, code in sorted(_OPERATOR_COUNTRY, key=lambda item: -len(item[0])):
+        if tag in blob:
+            row["country"] = code
+            if code == "FR":
+                row["km"] = _correct_french_km(float(row.get("km") or 0), float(row.get("eur") or 0), code)
+            return
+
+
 def _is_bundle_row(row: dict) -> bool:
     entry = (row.get("entry") or "").strip()
     km = float(row.get("km") or 0)
@@ -656,6 +694,8 @@ def _is_bundle_row(row: dict) -> bool:
 
 def collapse_detail_summaries(rows: list[dict]) -> list[dict]:
     """Duitse tol staat vaak als deeltrajecten én als somregel; tel de som niet dubbel."""
+    for row in rows:
+        _reclassify_foreign_toll(row)
     groups: dict[tuple[str, str, str], list[int]] = defaultdict(list)
     for index, row in enumerate(rows):
         key = (row.get("date") or "", row.get("plate") or "", _report_country_code(row))
@@ -846,6 +886,13 @@ def normalize_country(value: str) -> str:
         "esp": "Spanje",
         "spanje": "Spanje",
         "spain": "Spanje",
+        "pt": "Portugal",
+        "prt": "Portugal",
+        "portugal": "Portugal",
+        "si": "Slovenië",
+        "svn": "Slovenië",
+        "slovenie": "Slovenië",
+        "slovenia": "Slovenië",
         "dk": "Denemarken",
         "dnk": "Denemarken",
         "denemarken": "Denemarken",
@@ -855,40 +902,36 @@ def normalize_country(value: str) -> str:
 
 
 _TUNNEL_LABELS = (
-    ("liefkenshoek", "Liefkenshoektunnel"),
-    ("blankenburg", "Blankenburgtunnel"),
-    ("westerschelde", "Westerscheldetunnel"),
-    ("kennedytunnel", "Kennedytunnel"),
-    ("coentunnel", "Coentunnel"),
-    ("beneluxtunnel", "Beneluxtunnel"),
-    ("sluiskil", "Sluiskiltunnel"),
-    ("drechttunnel", "Drechttunnel"),
-    ("heinenoord", "Heinenoordtunnel"),
-    ("kiltunnel", "Kiltunnel"),
-    ("vlaardingen", "Vlaardingentunnel"),
-    ("wijkertunnel", "Wijkertunnel"),
-    ("zeeburgertunnel", "Zeeburgertunnel"),
-    ("noordzuid", "Noord/Zuid-Holland"),
+    ("liefkenshoek", "Liefkenshoek"),
+    ("blankenburg", "Blankenburg"),
+    ("westerschelde", "Westerschelde"),
+    ("kennedytunnel", "Kennedy"),
+    ("coentunnel", "Coen"),
+    ("beneluxtunnel", "Benelux"),
+    ("sluiskil", "Sluiskil"),
+    ("drechttunnel", "Drecht"),
+    ("heinenoord", "Heinenoord"),
+    ("kiltunnel", "Kil"),
+    ("vlaardingen", "Vlaardingen"),
+    ("wijkertunnel", "Wijker"),
+    ("zeeburgertunnel", "Zeeburger"),
 )
 
 
 def _tunnel_label(row: dict) -> str:
-    """Tunnels staan in Spec Page / product / LHT, niet als gewone wegkilometers."""
+    """Korte tunnelnaam. De kolom heet al Tunnel, dus geen lange omschrijving."""
     blob = " ".join(
         str(row.get(key) or "")
         for key in ("spec", "product", "road", "entry", "exit", "tsp")
     )
     compact = re.sub(r"[^a-z0-9]+", "", blob.lower())
-    if "lht" in compact:
-        return "Liefkenshoektunnel"
+    if "lht" in compact or "liefkenshoek" in compact:
+        return "Liefkenshoek"
     for needle, label in _TUNNEL_LABELS:
         if needle in compact:
             return label
     if "tunnel" in compact:
-        for key in ("spec", "product", "road"):
-            raw = str(row.get(key) or "").strip()
-            if raw and "tunnel" in raw.lower():
-                return raw.split(";")[0].strip()
+        return "Tunnel"
     return ""
 
 
@@ -951,10 +994,10 @@ def _allocate_plan_km_by_country(rows: list[dict]) -> None:
 
 
 def _french_toll_km_incomplete(plan_km: float, toll_km: float) -> bool:
-    """Tolrapport mist Franse km als het duidelijk onder de rit uit het rittenboek blijft."""
+    """Tolrapport mist Franse km zodra de rest van het rittenboek duidelijk hoger is."""
     if plan_km < 80:
         return False
-    return toll_km <= 0 or toll_km < 0.55 * plan_km
+    return toll_km + 1 < plan_km
 
 
 def _fill_incomplete_french_km(rows: list[dict]) -> None:
