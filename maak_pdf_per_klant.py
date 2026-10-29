@@ -150,19 +150,13 @@ def make_pdf(
         Paragraph("Datum", header),
         Paragraph("Kenteken", header),
         Paragraph("Rit", header),
-        Paragraph("Weg", header),
         Paragraph("Land", header),
         Paragraph("KM rit<br/><font size='6.5'>planning</font>", header),
         Paragraph("KM tol<br/><font size='6.5'>rapport</font>", header),
         Paragraph("Tol", header),
     ]
     if show_tunnel:
-        headers.extend(
-            [
-                Paragraph("Tunnel", header),
-                Paragraph("Tunnel €", header),
-            ]
-        )
+        headers.append(Paragraph("Tunnel €", header))
     data = [headers]
     counted_trips = set()
     total_plan_km = 0.0
@@ -180,7 +174,6 @@ def make_pdf(
             row["date"].strftime("%d-%m-%Y") if row.get("date") else "",
             row.get("plate") or "",
             Paragraph((row.get("ritnr") or "—").replace(" / ", "<br/>"), table_text),
-            Paragraph(row.get("weg") or "—", table_text),
             row.get("country") or "—",
             number(plan_km) if plan_km else "—",
             km_tol,
@@ -188,25 +181,20 @@ def make_pdf(
         ]
         if show_tunnel:
             tunnel_eur = float(row.get("tunnelEur") or 0)
-            line.extend(
-                [
-                    Paragraph(row.get("tunnel") or "—", table_text),
-                    euro(tunnel_eur) if tunnel_eur else "—",
-                ]
-            )
+            line.append(euro(tunnel_eur) if tunnel_eur else "—")
         data.append(line)
 
     total_km = round(sum(row.get("km") or 0 for row in rows), 1)
     total_eur = round(sum(row.get("eur") or 0 for row in rows), 2)
     total_tunnel = round(sum(float(row.get("tunnelEur") or 0) for row in rows), 2)
-    footer = ["", "", "Totaal", "", "", number(round(total_plan_km, 1)), number(total_km), euro(total_eur)]
+    footer = ["", "", "Totaal", "", number(round(total_plan_km, 1)), number(total_km), euro(total_eur)]
     if show_tunnel:
-        footer.extend(["", euro(total_tunnel) if total_tunnel else "—"])
+        footer.append(euro(total_tunnel) if total_tunnel else "—")
     data.append(footer)
 
-    widths = [16 * mm, 20 * mm, 16 * mm, 32 * mm, 16 * mm, 14 * mm, 14 * mm, 16 * mm]
+    widths = [20 * mm, 26 * mm, 50 * mm, 24 * mm, 18 * mm, 18 * mm, 22 * mm]
     if show_tunnel:
-        widths = [14 * mm, 18 * mm, 14 * mm, 24 * mm, 14 * mm, 13 * mm, 13 * mm, 15 * mm, 22 * mm, 16 * mm]
+        widths = [18 * mm, 24 * mm, 42 * mm, 20 * mm, 16 * mm, 16 * mm, 20 * mm, 22 * mm]
     table = Table(
         data,
         colWidths=widths,
@@ -219,7 +207,7 @@ def make_pdf(
         ("BACKGROUND", (0, 0), (-1, 0), BLUE),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), FONT),
-        ("ALIGN", (5, 1), (7, -1), "RIGHT"),
+        ("ALIGN", (4, 1), (6, -1), "RIGHT"),
         ("GRID", (0, 0), (-1, -2), 0.35, colors.HexColor("#CBD5DC")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F6F8FA")]),
         ("BACKGROUND", (0, -1), (-1, -1), LIGHT_BLUE),
@@ -230,10 +218,10 @@ def make_pdf(
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
     if show_tunnel:
-        style.append(("ALIGN", (9, 1), (9, -1), "RIGHT"))
+        style.append(("ALIGN", (7, 1), (7, -1), "RIGHT"))
     table.setStyle(TableStyle(style))
     guide = (
-        "Leeswijzer: <b>Rit</b> en <b>Weg</b> komen uit het rittenboek van die dag. "
+        "Leeswijzer: <b>Rit</b> komt uit het rittenboek van die dag. "
         "<b>Land</b>, <b>KM tol</b> en <b>Tol</b> komen uit het tolrapport. "
         "<b>KM rit</b> is de kilometer van die rit en telt in het totaal één keer."
     )

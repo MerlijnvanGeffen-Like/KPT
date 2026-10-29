@@ -123,7 +123,7 @@ const SLIM_COLUMNS = [
   ["Trx ID", ["trxid"]],
   ["Trx Date", ["trxdate", "datum"]],
   ["Trx Time", ["trxtime", "tijd"]],
-  ["Truck PlateNr", ["truckplatenr", "kenteken", "cardplatenr", "fileplatenr"]],
+  ["Truck PlateNr", ["truckplatenr"], "plate"],
   ["Trx Country", ["trxcountry", "land"]],
   ["Distance KM", ["distancekm"]],
   ["Total Amt (EUR)", ["totalamteur", "trxamteur", "toleur"]],
@@ -156,7 +156,10 @@ function csvHeaderMeta(headerLine) {
   };
   const idx = findCol(["trxdate", "datum"]);
   const keep = SLIM_COLUMNS.map(([, aliases]) => findCol(aliases));
-  return { delim, idx, keep, outHeader: SLIM_COLUMNS.map(([label]) => label).join(";") };
+  const plateIndexes = ["truckplatenr", "cardplatenr", "fileplatenr", "kenteken"]
+    .map((alias) => names.findIndex((name) => name === alias))
+    .filter((index) => index >= 0);
+  return { delim, idx, keep, plateIndexes, outHeader: SLIM_COLUMNS.map(([label]) => label).join(";") };
 }
 
 function rowDateIso(cols, dateIdx) {
@@ -164,8 +167,16 @@ function rowDateIso(cols, dateIdx) {
   return csvDateToIso(cols[dateIdx] || "");
 }
 
-function slimRow(cols, keep) {
-  return keep.map((index) => (index >= 0 ? String(cols[index] ?? "").replace(/;/g, ",") : "")).join(";");
+function slimRow(cols, keep, plateIndexes) {
+  return keep.map((index, position) => {
+    if (SLIM_COLUMNS[position][2] === "plate" && plateIndexes.length) {
+      const found = plateIndexes
+        .map((plateIndex) => cols[plateIndex] ?? "")
+        .find((value) => String(value).trim());
+      return String(found || "").replace(/;/g, ",");
+    }
+    return index >= 0 ? String(cols[index] ?? "").replace(/;/g, ",") : "";
+  }).join(";");
 }
 
 async function slimCsvToPlanning(file, ranges, onProgress) {
@@ -195,7 +206,7 @@ async function slimCsvToPlanning(file, ranges, onProgress) {
       const iso = rowDateIso(cols, meta.idx);
       if (dateInRanges(iso, ranges)) {
         kept += 1;
-        lines.push(slimRow(cols, meta.keep));
+        lines.push(slimRow(cols, meta.keep, meta.plateIndexes));
       }
     }
   };
